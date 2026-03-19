@@ -2,7 +2,35 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-This is a local FastAPI app that lets you paste a YouTube or Bilibili link, choose MP4 resolution or MP3 quality, and download directly in your browser.
+<p align="center">
+  <img src="docs/screenshots/banner.png" alt="Banner for the local YouTube and Bilibili downloader" width="100%" />
+</p>
+
+A clean local downloader for YouTube and Bilibili. Paste a link, fetch available formats, and save MP4 video or MP3 audio directly from your browser.
+
+## Why This Project
+
+- Runs locally on your machine instead of sending requests through a third-party website.
+- Gives you a simple browser workflow for both YouTube and Bilibili in one place.
+- Supports direct MP4 downloads, MP3 conversion, and high-quality preparation for formats that need merging.
+- Exposes progress clearly so the user can see when a large download is being prepared.
+- Keeps the stack small and understandable with FastAPI, yt-dlp, and FFmpeg.
+
+## Highlights
+
+- YouTube and Bilibili support
+- MP4 video and MP3 audio downloads
+- Format picker with resolution, bitrate, and size hints
+- High-resolution preparation flow for formats that require video/audio merging
+- Optional Chrome cookie import for restricted videos
+- Built-in temporary file cleanup controls
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="Overview screen of the local media downloader" width="49%" />
+  <img src="docs/screenshots/workflow.png" alt="Format selection and high-quality download preparation" width="49%" />
+</p>
 
 ## Open Source Projects Used
 

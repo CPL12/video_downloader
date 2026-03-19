@@ -2,7 +2,35 @@
 
 语言： [English](README.md) | 简体中文
 
-这是一个本地 FastAPI 应用，你可以粘贴 YouTube 或 Bilibili 链接，选择 MP4 分辨率或 MP3 音质，然后直接在浏览器中下载。
+<p align="center">
+  <img src="docs/screenshots/banner.png" alt="本地 YouTube 和 Bilibili 下载器横幅图" width="100%" />
+</p>
+
+这是一个本地化的 YouTube 和 Bilibili 下载工具。你只需要粘贴链接、读取可用格式，然后就可以直接在浏览器中下载 MP4 视频或 MP3 音频。
+
+## 为什么做这个项目
+
+- 完全在你的电脑本地运行，不需要依赖第三方下载网站。
+- 用一个简洁的浏览器界面同时处理 YouTube 和 Bilibili 链接。
+- 同时支持 MP4 下载、MP3 转码，以及需要合并音视频时的高质量准备流程。
+- 会显示准备进度，用户可以清楚知道大文件当前处理到哪里。
+- 技术栈简单直接，核心依赖就是 FastAPI、yt-dlp 和 FFmpeg。
+
+## 功能亮点
+
+- 支持 YouTube 和 Bilibili
+- 支持 MP4 视频和 MP3 音频下载
+- 提供分辨率、码率、体积等格式信息
+- 支持需要合并音视频时的高分辨率准备流程
+- 可选 Chrome cookies 导入，用于受限视频
+- 内置临时文件清理功能
+
+## 截图
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="本地媒体下载器概览界面" width="49%" />
+  <img src="docs/screenshots/workflow.png" alt="格式选择与高质量下载准备流程" width="49%" />
+</p>
 
 ## 使用的开源项目
 
