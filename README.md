@@ -4,6 +4,14 @@ Language: English | [简体中文](README.zh-CN.md)
 
 This is a local FastAPI app that lets you paste a YouTube or Bilibili link, choose MP4 resolution or MP3 quality, and download directly in your browser.
 
+## Open Source Projects Used
+
+- [FastAPI](https://github.com/fastapi/fastapi) for the local web application and API.
+- [Uvicorn](https://github.com/encode/uvicorn) as the ASGI server.
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) for extracting video and audio formats and handling downloads.
+- [FFmpeg](https://ffmpeg.org/) for media processing and MP3 transcoding.
+- [python-multipart](https://github.com/Kludex/python-multipart) for form-data handling in FastAPI uploads/forms.
+
 ## Prerequisites
 
 - Python 3.10+
