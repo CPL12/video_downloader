@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local Media Downloader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Spline+Sans:wght@400;600&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
+</head>
+
+<body>
+  <main class="shell">
+    <header class="hero">
+      <h1>Local Media Downloader</h1>
+    </header>
+
+    <section class="panel">
+      <div class="field">
+        <label for="urlInput">Video URL</label>
+        <input id="urlInput" type="text" placeholder="" autocomplete="off" />
+      </div>
+      <div class="actions" style="margin-top: 16px">
+        <button id="fetchBtn">Fetch formats</button>
+        <button class="secondary" id="clearBtn" type="button">Reset</button>
+      </div>
+      <div id="status" style="margin-top: 16px"></div>
+    </section>
+
+    <section id="formatsPanel" class="panel hidden">
+      <h2 id="titleHeading">Available formats</h2>
+      <div class="format-grid">
+        <div class="toggle" id="typeToggle">
+          <label>
+            <input type="radio" name="downloadType" value="mp4" checked />
+            MP4 video
+          </label>
+          <label>
+            <input type="radio" name="downloadType" value="mp3" />
+            MP3 audio
+          </label>
+        </div>
+
+        <div id="mp4Options" class="option-list"></div>
+
+        <div id="mp3Options" class="hidden">
+          <label for="mp3Quality">MP3 quality</label>
+          <select id="mp3Quality"></select>
+        </div>
+
+        <div class="actions">
+          <button id="downloadBtn" type="button">Download</button>
+        </div>
+
+        <div id="progressContainer" class="progress-container hidden">
+          <div class="progress-bar">
+            <div id="progressFill" class="progress-fill" style="width: 0%"></div>
+          </div>
+          <div id="progressText" class="progress-text">0% — Connecting...</div>
+        </div>
+      </div>
+    </section>
+
+
+    <section class="maintenance-panel">
+      <div class="maintenance-info">
+        <h3>Server Maintenance</h3>
+        <p>Remove all temporary preparation files and reset active download tasks on the server.</p>
+      </div>
+      <button class="danger" id="clearTempBtn" type="button">Purge Server Temps</button>
+    </section>
+
+    <form id="downloadForm" method="post" action="/api/download" target="_blank">
+      <input type="hidden" name="url" />
+      <input type="hidden" name="type" />
+      <input type="hidden" name="format_id" />
+      <input type="hidden" name="height" />
+      <input type="hidden" name="audio_quality" />
+      <input type="hidden" name="title" />
+    </form>
+  </main>
+
+  <script src="/static/app.js?v=3"></script>
+</body>
+
+</html>
