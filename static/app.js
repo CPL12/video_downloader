@@ -14,11 +14,30 @@ const progressContainer = document.getElementById("progressContainer");
 const progressFill = document.getElementById("progressFill");
 const progressText = document.getElementById("progressText");
 const clearTempBtn = document.getElementById("clearTempBtn");
+const platformSummary = document.getElementById("platformSummary");
+const platformExamples = document.getElementById("platformExamples");
 
 let currentData = null;
-// State machine for high-res downloads: "idle" | "preparing" | "ready"
 let downloadState = "idle";
-let prepareAbort = null; // AbortController instance
+let prepareAbort = null;
+const pageParams = new URLSearchParams(window.location.search);
+const demoMode = pageParams.get("demo");
+const POPULAR_PLATFORMS = [
+  "YouTube",
+  "Bilibili",
+  "TikTok",
+  "Instagram",
+  "X",
+  "Facebook",
+  "Vimeo",
+  "Twitch",
+  "Dailymotion",
+  "SoundCloud",
+];
+
+if (pageParams.get("theme") === "light") {
+  document.documentElement.dataset.theme = "light";
+}
 
 function setStatus(message, kind = "info") {
   if (!message) {
@@ -48,10 +67,10 @@ function showProgress(pct, speed, eta) {
 
   let text = `${pct.toFixed(1)}%`;
   if (speed && speed !== "0 KiB/s" && speed !== "cached") {
-    text += `  ?  ${speed}`;
+    text += ` | ${speed}`;
   }
   if (eta && eta !== "unknown" && eta !== "00:00") {
-    text += `  ?  ETA: ${eta}`;
+    text += ` | ETA: ${eta}`;
   }
   progressText.textContent = text;
 }
@@ -67,6 +86,23 @@ function resetDownloadButton() {
   downloadBtn.classList.remove("ready", "stop");
   downloadBtn.disabled = false;
   downloadState = "idle";
+}
+
+function renderPlatformExamples(platforms) {
+  platformExamples.innerHTML = "";
+
+  platforms.forEach((platform) => {
+    const chip = document.createElement("span");
+    chip.className = "platform-chip";
+    chip.textContent = platform;
+    platformExamples.appendChild(chip);
+  });
+}
+
+function showPopularPlatforms() {
+  renderPlatformExamples(POPULAR_PLATFORMS);
+  platformSummary.textContent =
+    "Works well with these common platforms. Other yt-dlp-compatible URLs may also work.";
 }
 
 function renderMp4Options(formats) {
@@ -102,7 +138,7 @@ function renderMp4Options(formats) {
     const size = formatBytes(fmt.filesize);
     const bitrate = fmt.tbr ? `${Math.round(fmt.tbr)} kbps` : "";
 
-    let metaText = [size, bitrate].filter(Boolean).join(" ? ");
+    let metaText = [size, bitrate].filter(Boolean).join(" | ");
     if (fmt.need_merge) {
       metaText += " (High Quality)";
     }
@@ -140,7 +176,6 @@ function updateTypeView() {
   }
 }
 
-
 async function fetchFormats() {
   const url = urlInput.value.trim();
   if (!url) {
@@ -150,7 +185,6 @@ async function fetchFormats() {
 
   setStatus("Fetching available formats...", "info");
   formatsPanel.classList.add("hidden");
-  // Reset download state and UI
   stopPreparation();
   resetDownloadButton();
   hideProgress();
@@ -208,57 +242,52 @@ async function startPreparation(url, formatId, title) {
   const params = new URLSearchParams({
     url,
     format_id: formatId,
-    title
+    title,
   });
 
   downloadState = "preparing";
   prepareAbort = new AbortController();
 
-  // Update button to "Stop"
   downloadBtn.textContent = "Stop Preparation";
   downloadBtn.classList.add("stop");
   downloadBtn.disabled = false;
 
-  // Show base progress
   showProgress(0, "", "");
 
   try {
     while (true) {
       const response = await fetch(`/api/prepare?${params.toString()}`, {
-        signal: prepareAbort.signal
+        signal: prepareAbort.signal,
       });
       if (!response.ok) throw new Error("Preparation request failed");
       const status = await response.json();
 
       if (status.status === "finished") {
-        // Preparation done! Switch to "ready" state
         downloadState = "ready";
         downloadBtn.disabled = false;
-        downloadBtn.textContent = "⬇ Download Ready — Click to Save";
+        downloadBtn.textContent = "Download Ready - Click to Save";
         downloadBtn.classList.remove("stop");
         downloadBtn.classList.add("ready");
 
         showProgress(100, status.speed || "", "");
-        setStatus("File is ready! Click the button to start downloading.", "info");
+        setStatus("File is ready. Click the button to start downloading.", "info");
         return;
       }
 
       if (status.status === "merging") {
-        downloadBtn.textContent = "Merging Video & Audio...";
+        downloadBtn.textContent = "Merging Video and Audio...";
         downloadBtn.disabled = true;
         downloadBtn.classList.remove("stop");
         showProgress(100, "merging", "");
-        setStatus("Almost done! Merging video and audio streams...", "info");
+        setStatus("Almost done. Merging video and audio streams...", "info");
       } else if (status.status === "error") {
         throw new Error(status.error || "Preparation failed");
       } else {
-        // Update independent progress bar
-        const pct = status.progress || 0;
-        showProgress(pct, status.speed || "", status.eta || "");
+        showProgress(status.progress || 0, status.speed || "", status.eta || "");
         setStatus("Preparing your high-resolution download...", "info");
       }
 
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   } catch (err) {
     if (err.name === "AbortError") {
@@ -284,13 +313,11 @@ function triggerDownload() {
     return;
   }
 
-  // STATE: "preparing" — user clicked "Stop"
   if (downloadState === "preparing") {
     stopPreparation();
     return;
   }
 
-  // STATE: "ready" — user clicked after preparation finished.
   if (downloadState === "ready") {
     const formData = buildFormData();
     if (!formData) {
@@ -298,17 +325,13 @@ function triggerDownload() {
       return;
     }
     fillFormFields(formData);
-
-    // Reset for next time
     resetDownloadButton();
     hideProgress();
-
-    setStatus("Download starting — your browser or download manager will handle it.", "info");
+    setStatus("Download starting - your browser or download manager will handle it.", "info");
     downloadForm.submit();
     return;
   }
 
-  // STATE: "idle" — start a new download
   const type = document.querySelector("input[name='downloadType']:checked").value;
   if (type === "mp4") {
     const selectedInput = document.querySelector("input[name='mp4Format']:checked");
@@ -317,24 +340,67 @@ function triggerDownload() {
       return;
     }
     const formatId = selectedInput.value;
-    const fmt = currentData.mp4.find(f => f.format_id === formatId);
+    const fmt = currentData.mp4.find((item) => item.format_id === formatId);
 
     if (fmt && fmt.need_merge) {
-      // High quality: start preparation
       startPreparation(urlInput.value.trim(), formatId, currentData.title);
       return;
     }
   }
 
-  // Standard quality: direct form submit
   const formData = buildFormData();
   if (!formData) {
     setStatus("Select a format.", "error");
     return;
   }
   fillFormFields(formData);
-  setStatus("Download starting — your browser or download manager will handle it.", "info");
+  setStatus("Download starting - your browser or download manager will handle it.", "info");
   downloadForm.submit();
+}
+
+function applyDemoState() {
+  if (!demoMode) {
+    return;
+  }
+
+  if (demoMode === "overview") {
+    urlInput.value = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    setStatus(
+      "Browse the popular platform list below or fetch formats to download MP4 or MP3 directly from your browser.",
+      "info"
+    );
+    return;
+  }
+
+  if (demoMode === "workflow") {
+    urlInput.value = "https://www.bilibili.com/video/BV1xx411c7mD";
+    currentData = {
+      title: "Sunset City Session",
+      mp4: [
+        { format_id: "137", height: 1080, fps: 60, tbr: 5820, filesize: 148897792, need_merge: true },
+        { format_id: "22", height: 720, fps: 30, tbr: 2100, filesize: 50331648, need_merge: false },
+        { format_id: "18", height: 360, fps: 30, tbr: 780, filesize: 19922944, need_merge: false },
+      ],
+      mp3_qualities: [128, 192, 256, 320],
+    };
+
+    titleHeading.textContent = `Available formats for: ${currentData.title}`;
+    renderMp4Options(currentData.mp4);
+    renderMp3Options(currentData.mp3_qualities);
+    formatsPanel.classList.remove("hidden");
+    updateTypeView();
+
+    downloadState = "preparing";
+    downloadBtn.textContent = "Preparing High-Quality Download";
+    downloadBtn.disabled = true;
+    downloadBtn.classList.remove("ready", "stop");
+
+    showProgress(72, "8.2 MiB/s", "00:19");
+    setStatus(
+      "High-resolution video is being prepared on the server before the final save step.",
+      "info"
+    );
+  }
 }
 
 fetchBtn.addEventListener("click", fetchFormats);
@@ -351,7 +417,7 @@ clearBtn.addEventListener("click", () => {
 downloadBtn.addEventListener("click", triggerDownload);
 
 clearTempBtn.addEventListener("click", async () => {
-  if (!confirm("Are you sure you want to clear ALL temporary files and active tasks from the server?")) {
+  if (!confirm("Are you sure you want to clear all temporary files and active tasks from the server?")) {
     return;
   }
 
@@ -364,7 +430,6 @@ clearTempBtn.addEventListener("click", async () => {
     }
     const result = await response.json();
 
-    // Clear local UI state as well
     stopPreparation();
     resetDownloadButton();
     hideProgress();
@@ -380,3 +445,5 @@ Array.from(typeToggle.querySelectorAll("input")).forEach((input) => {
 });
 
 updateTypeView();
+showPopularPlatforms();
+applyDemoState();

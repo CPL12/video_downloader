@@ -10,13 +10,14 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Spline+Sans:wght@400;600&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 
 <body>
   <main class="shell">
     <header class="hero">
       <h1>Local Media Downloader</h1>
+      <p>Fetch formats and download MP4 or MP3 from a clean local UI built around popular video platforms.</p>
     </header>
 
     <section class="panel">
@@ -34,6 +35,16 @@
         <button class="secondary" id="clearBtn" type="button">Reset</button>
       </div>
       <div id="status" style="margin-top: 16px"></div>
+    </section>
+
+    <section class="panel support-panel">
+      <div class="support-heading">
+        <div>
+          <h2>Popular Platforms</h2>
+          <p id="platformSummary">Works well with these common platforms. Other yt-dlp-compatible URLs may also work.</p>
+        </div>
+      </div>
+      <div id="platformExamples" class="support-examples"></div>
     </section>
 
     <section id="formatsPanel" class="panel hidden">
@@ -65,11 +76,10 @@
           <div class="progress-bar">
             <div id="progressFill" class="progress-fill" style="width: 0%"></div>
           </div>
-          <div id="progressText" class="progress-text">0% — Connecting...</div>
+          <div id="progressText" class="progress-text">0% | Connecting...</div>
         </div>
       </div>
     </section>
-
 
     <section class="maintenance-panel">
       <div class="maintenance-info">
@@ -89,7 +99,7 @@
     </form>
   </main>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 
 </html>

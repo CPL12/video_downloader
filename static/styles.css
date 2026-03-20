@@ -16,7 +16,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg-1: #1a1a1d;
     --bg-2: #2d2325;
     --bg-3: #16181b;
@@ -261,6 +261,43 @@ button.secondary {
 .format-grid {
   display: grid;
   gap: 16px;
+}
+
+.support-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.support-heading {
+  display: flex;
+  align-items: flex-start;
+}
+
+.support-heading p {
+  margin: 0;
+  color: var(--muted);
+  max-width: 720px;
+}
+
+.support-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.platform-chip,
+.platform-item {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  font-size: 0.9rem;
+}
+
+.platform-chip {
+  font-weight: 700;
 }
 
 .toggle {
