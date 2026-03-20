@@ -61,16 +61,22 @@ function formatBytes(bytes) {
   return `${value.toFixed(value < 10 ? 1 : 0)} ${units[index]}`;
 }
 
-function showProgress(pct, speed, eta) {
+function showProgress(pct, speed, eta, phaseLabel = "", detail = "") {
   progressContainer.classList.remove("hidden");
   progressFill.style.width = `${Math.min(pct, 100)}%`;
 
   let text = `${pct.toFixed(1)}%`;
+  if (phaseLabel) {
+    text = `${phaseLabel} | ${text}`;
+  }
   if (speed && speed !== "0 KiB/s" && speed !== "cached") {
     text += ` | ${speed}`;
   }
   if (eta && eta !== "unknown" && eta !== "00:00") {
     text += ` | ETA: ${eta}`;
+  }
+  if (detail) {
+    text += ` | ${detail}`;
   }
   progressText.textContent = text;
 }
@@ -269,8 +275,8 @@ async function startPreparation(url, formatId, title) {
         downloadBtn.classList.remove("stop");
         downloadBtn.classList.add("ready");
 
-        showProgress(100, status.speed || "", "");
-        setStatus("File is ready. Click the button to start downloading.", "info");
+        showProgress(100, "", "", status.phase_label || "Ready", status.message || "");
+        setStatus(status.message || "File is ready. Click the button to start downloading.", "info");
         return;
       }
 
@@ -278,13 +284,25 @@ async function startPreparation(url, formatId, title) {
         downloadBtn.textContent = "Merging Video and Audio...";
         downloadBtn.disabled = true;
         downloadBtn.classList.remove("stop");
-        showProgress(100, "merging", "");
-        setStatus("Almost done. Merging video and audio streams...", "info");
+        showProgress(
+          status.progress || 0,
+          "",
+          "",
+          status.phase_label || "Merging Video and Audio",
+          status.message || ""
+        );
+        setStatus(status.message || "Merging video and audio streams...", "info");
       } else if (status.status === "error") {
         throw new Error(status.error || "Preparation failed");
       } else {
-        showProgress(status.progress || 0, status.speed || "", status.eta || "");
-        setStatus("Preparing your high-resolution download...", "info");
+        showProgress(
+          status.progress || 0,
+          status.progress >= 100 ? "" : status.speed || "",
+          status.eta || "",
+          status.phase_label || "Preparing Download",
+          status.message || ""
+        );
+        setStatus(status.message || "Preparing your high-resolution download...", "info");
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));

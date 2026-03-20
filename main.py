@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,6 +16,8 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 DOWNLOADS_DIR = STATIC_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DOWNLOADS_DIR = DOWNLOADS_DIR / ".prep"
+TEMP_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Tracks background preparation tasks: {task_id: {status, progress, speed, filename, etc.}}
 active_tasks = {}
@@ -30,12 +33,13 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 def cleanup_old_downloads():
     """Remove files older than 1 hour from the downloads directory."""
-    import time
     now = time.time()
     try:
         for f in DOWNLOADS_DIR.glob("*"):
             if f.is_file() and (now - f.stat().st_mtime) > 3600:
                 f.unlink()
+            elif f.is_dir() and (now - f.stat().st_mtime) > 3600:
+                shutil.rmtree(f, ignore_errors=True)
     except Exception:
         pass
 
@@ -339,56 +343,315 @@ def parse_download_progress(line: str):
     except Exception:
         return None
 
-def background_downloader(task_id: str, url: str, format_id: str, filename: str, cookies: str | None, auto_close: bool):
-    out_path = DOWNLOADS_DIR / filename
-    temp_path = out_path.with_suffix(".tmp")
-    
-    # We use -f format+bestaudio to ensure merging
-    # --concurrent-fragments 5 for speed
+
+def update_task(task_id: str, **fields):
+    with active_tasks_lock:
+        if task_id in active_tasks:
+            active_tasks[task_id].update(fields)
+
+
+def run_download_step(
+    task_id: str,
+    url: str,
+    format_selector: str,
+    output_template: Path,
+    cookies: str | None,
+    label: str,
+):
     cmd = [
         sys.executable, "-m", "yt_dlp",
-        "-f", f"{format_id}+bestaudio/best",
-        "--merge-output-format", "mp4",
-        "--concurrent-fragments", "5",
+        "-f", format_selector,
         "--no-playlist",
+        "--newline",
+        "--concurrent-fragments", "5",
         "--js-runtimes", "node",
         "--remote-components", "ejs:github",
         *cookie_args(cookies),
-        "--postprocessor-args", "ffmpeg:-c:a aac -b:a 192k",
-        "-o", str(out_path),
-        url
+        "-o", str(output_template),
+        url,
     ]
-    
-    with active_tasks_lock:
-        active_tasks[task_id]["status"] = "downloading"
-        active_tasks[task_id]["filename"] = filename
 
+    update_task(
+        task_id,
+        status="downloading",
+        phase="download",
+        phase_label=f"Downloading {label}",
+        progress=0.0,
+        speed="",
+        eta="unknown",
+        message=f"Downloading {label.lower()}...",
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    last_info = {"progress": 0.0, "speed": "", "eta": "unknown"}
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         for line in proc.stdout:
             info = parse_download_progress(line)
-            if info:
-                with active_tasks_lock:
-                    active_tasks[task_id].update(info)
-        
-        # After the download/progress loop ends, we're usually in the merging phase
-        with active_tasks_lock:
-            active_tasks[task_id]["status"] = "merging"
-            active_tasks[task_id]["progress"] = 100.0
-
+            if not info:
+                continue
+            last_info.update(info)
+            update_task(
+                task_id,
+                progress=last_info.get("progress", 0.0),
+                speed=last_info.get("speed", ""),
+                eta=last_info.get("eta", "unknown"),
+                message=f"Downloading {label.lower()}...",
+            )
+    finally:
         proc.wait()
-        if proc.returncode == 0 and out_path.exists():
-            with active_tasks_lock:
-                active_tasks[task_id]["status"] = "finished"
-                active_tasks[task_id]["progress"] = 100.0
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"yt-dlp failed while downloading {label.lower()}.")
+
+    update_task(
+        task_id,
+        progress=100.0,
+        speed="",
+        eta="00:00",
+        message=f"{label} download complete.",
+    )
+
+
+def find_downloaded_file(task_dir: Path, stem: str) -> Path:
+    matches = [path for path in task_dir.glob(f"{stem}.*") if path.is_file()]
+    if not matches:
+        raise FileNotFoundError(f"Could not locate downloaded {stem} file.")
+    return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def get_media_duration_seconds(path: Path) -> float | None:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            try:
+                duration = float((proc.stdout or "").strip())
+                if duration > 0:
+                    return duration
+            except ValueError:
+                pass
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+
+    proc = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    output = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    match = re.search(r"Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def get_media_stream_codec(path: Path, stream_selector: str) -> str | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+
+    proc = subprocess.run(
+        [
+            ffprobe,
+            "-v", "error",
+            "-select_streams", stream_selector,
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    codec = (proc.stdout or "").strip().lower()
+    return codec or None
+
+
+def parse_ffmpeg_progress(line: str, total_duration: float | None):
+    if "=" not in line:
+        return None
+    key, value = line.strip().split("=", 1)
+    if key not in {"out_time_ms", "out_time_us", "out_time"}:
+        return None
+
+    elapsed = None
+    if key == "out_time":
+        match = re.match(r"(\d+):(\d+):(\d+(?:\.\d+)?)", value)
+        if match:
+            hours, minutes, seconds = match.groups()
+            elapsed = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    else:
+        try:
+            raw_elapsed = float(value)
+            if key == "out_time_us":
+                elapsed = raw_elapsed / 1_000_000
+            elif total_duration and raw_elapsed > total_duration * 1_000:
+                elapsed = raw_elapsed / 1_000_000
+            else:
+                elapsed = raw_elapsed / 1_000
+        except ValueError:
+            return None
+
+    if elapsed is None:
+        return None
+
+    progress = None
+    if total_duration and total_duration > 0:
+        progress = max(0.0, min((elapsed / total_duration) * 100, 100.0))
+
+    return {"merge_progress": progress}
+
+
+def merge_streams_with_progress(task_id: str, video_path: Path, audio_path: Path, out_path: Path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH.")
+
+    durations = [duration for duration in (
+        get_media_duration_seconds(video_path),
+        get_media_duration_seconds(audio_path),
+    ) if duration]
+    total_duration = max(durations) if durations else None
+    audio_codec = get_media_stream_codec(audio_path, "a:0")
+    can_copy_audio = audio_codec == "aac"
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-c:v", "copy",
+        "-c:a", "copy" if can_copy_audio else "aac",
+        *(["-b:a", "192k"] if not can_copy_audio else []),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-progress", "pipe:1",
+        "-nostats",
+        str(out_path),
+    ]
+
+    update_task(
+        task_id,
+        status="merging",
+        phase="merge",
+        phase_label="Merging Video and Audio",
+        progress=0.0,
+        speed="",
+        eta="unknown",
+        message="Merging video and audio..." if can_copy_audio else "Merging video and converting audio to AAC...",
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stderr_capture = StderrCapture(proc.stderr)
+
+    try:
+        for line in proc.stdout:
+            info = parse_ffmpeg_progress(line, total_duration)
+            if not info:
+                continue
+            update_task(
+                task_id,
+                progress=info["merge_progress"] if info["merge_progress"] is not None else 0.0,
+                speed="",
+                eta="unknown",
+                message="Merging video and audio..." if can_copy_audio else "Merging video and converting audio to AAC...",
+            )
+    finally:
+        proc.wait()
+
+    if proc.returncode != 0:
+        raise RuntimeError(stderr_capture.text() or "ffmpeg failed while merging streams.")
+
+    update_task(
+        task_id,
+        progress=100.0,
+        speed="",
+        eta="00:00",
+        message="Merge complete. Finalizing file...",
+    )
+
+def background_downloader(task_id: str, url: str, format_id: str, filename: str, cookies: str | None, auto_close: bool):
+    out_path = DOWNLOADS_DIR / filename
+    task_dir = TEMP_DOWNLOADS_DIR / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    video_template = task_dir / "video.%(ext)s"
+    audio_template = task_dir / "audio.%(ext)s"
+
+    with active_tasks_lock:
+        active_tasks[task_id].update(
+            {
+                "status": "downloading",
+                "phase": "download",
+                "phase_label": "Downloading Video",
+                "filename": filename,
+                "message": "Downloading video...",
+            }
+        )
+
+    try:
+        if cookies and auto_close:
+            close_chrome_processes()
+
+        run_download_step(task_id, url, format_id, video_template, cookies, "Video")
+        run_download_step(
+            task_id,
+            url,
+            "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best",
+            audio_template,
+            cookies,
+            "Audio",
+        )
+
+        video_path = find_downloaded_file(task_dir, "video")
+        audio_path = find_downloaded_file(task_dir, "audio")
+        merge_streams_with_progress(task_id, video_path, audio_path, out_path)
+
+        if out_path.exists():
+            update_task(
+                task_id,
+                status="finished",
+                phase="finished",
+                phase_label="Ready",
+                progress=100.0,
+                speed="",
+                eta="00:00",
+                message="File is ready to save.",
+            )
         else:
-            with active_tasks_lock:
-                active_tasks[task_id]["status"] = "error"
-                active_tasks[task_id]["error"] = "yt-dlp failed to download or merge."
+            update_task(task_id, status="error", error="Prepared file was not created.")
     except Exception as e:
-        with active_tasks_lock:
-            active_tasks[task_id]["status"] = "error"
-            active_tasks[task_id]["error"] = str(e)
+        update_task(task_id, status="error", phase="error", phase_label="Error", error=str(e))
+    finally:
+        shutil.rmtree(task_dir, ignore_errors=True)
 
 def stream_merging(video_url: str, audio_url: str, filename: str):
     """
@@ -544,18 +807,24 @@ def prepare(
             if (DOWNLOADS_DIR / filename).exists():
                 active_tasks[task_id] = {
                     "status": "finished",
+                    "phase": "finished",
+                    "phase_label": "Ready",
                     "progress": 100.0,
-                    "speed": "cached",
+                    "speed": "",
                     "eta": "00:00",
-                    "filename": filename
+                    "filename": filename,
+                    "message": "File is ready to save.",
                 }
             else:
                 active_tasks[task_id] = {
                     "status": "pending",
+                    "phase": "pending",
+                    "phase_label": "Queued",
                     "progress": 0.0,
-                    "speed": "0 KiB/s",
+                    "speed": "",
                     "eta": "unknown",
-                    "filename": filename
+                    "filename": filename,
+                    "message": "Waiting to start preparation...",
                 }
                 background_tasks.add_task(
                     background_downloader,

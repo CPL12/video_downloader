@@ -19,3 +19,5 @@ Thumbs.db
 test.mp4
 formats.json
 test_formats.json
+
+*.mp4
