@@ -75,7 +75,7 @@ function renderMp4Options(formats) {
   if (!formats || formats.length === 0) {
     const note = document.createElement("div");
     note.className = "status error";
-    note.textContent = "No MP4 formats with built-in audio were found. Try MP3.";
+    note.textContent = "No MP4 video formats were found for this URL. Try MP3 or another source.";
     mp4Options.appendChild(note);
     return;
   }
@@ -380,4 +380,3 @@ Array.from(typeToggle.querySelectorAll("input")).forEach((input) => {
 });
 
 updateTypeView();
-

@@ -21,8 +21,13 @@
 
     <section class="panel">
       <div class="field">
-        <label for="urlInput">Video URL</label>
-        <input id="urlInput" type="text" placeholder="" autocomplete="off" />
+        <label for="urlInput">Media URL</label>
+        <input
+          id="urlInput"
+          type="text"
+          placeholder="Paste a media URL supported by yt-dlp"
+          autocomplete="off"
+        />
       </div>
       <div class="actions" style="margin-top: 16px">
         <button id="fetchBtn">Fetch formats</button>
@@ -84,7 +89,7 @@
     </form>
   </main>
 
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 
 </html>

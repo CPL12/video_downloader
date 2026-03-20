@@ -25,7 +25,7 @@ ALLOWED_COOKIE_SOURCES = {"chrome"}
 MAX_STDERR_BYTES = 65536
 CHROME_COOKIE_LOCK = "Could not copy Chrome cookie database"
 
-app = FastAPI(title="Local Downloader")
+app = FastAPI(title="Local Media Downloader")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 def cleanup_old_downloads():
@@ -77,14 +77,12 @@ def normalize_url(raw_url: str) -> str:
     if not re.match(r"^https?://", url, flags=re.IGNORECASE):
         url = "https://" + url
     parsed = urlparse(url)
-    host = (parsed.netloc or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    if host.endswith("youtube.com") or host == "youtu.be":
-        return url
-    if host.endswith("bilibili.com") or host == "b23.tv":
-        return url
-    raise HTTPException(status_code=400, detail="Only YouTube or Bilibili links are supported.")
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="Paste a valid http(s) media URL supported by yt-dlp.",
+        )
+    return url
 
 
 def sanitize_filename(value: str) -> str:
@@ -118,6 +116,9 @@ def normalize_ydl_error(message: str) -> str:
             "Close Chrome completely (including background processes) or "
             "enable Auto-close Chrome, then try again."
         )
+    lowered = message.lower()
+    if "unsupported url" in lowered or "no suitable extractor" in lowered:
+        return "This URL is not supported by the installed yt-dlp build."
     return message
 
 
