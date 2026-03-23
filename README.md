@@ -2,13 +2,17 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-A clean local downloader for popular platforms like YouTube, Bilibili, TikTok, and Instagram. Paste a link, fetch available formats, and save MP4 video or MP3 audio directly from your browser.
+A clean local downloader for popular platforms like YouTube, Bilibili, TikTok, and Instagram. Paste a link, fetch available formats, and save a single video or an entire playlist as MP4 or MP3 directly from your browser.
+
+<p align="center">
+  <img src="docs/screenshots/banner.png" alt="Banner image for the local media downloader project" width="100%" />
+</p>
 
 ## Why This Project
 
 - Runs locally on your machine instead of sending requests through a third-party website.
 - Gives you a simple browser workflow for multiple video platforms in one place.
-- Supports direct MP4 downloads, MP3 conversion, and high-quality preparation for formats that need merging.
+- Supports direct MP4 downloads, MP3 conversion, ZIP-packaged playlist downloads, and high-quality preparation for formats that need merging.
 - Exposes progress clearly so the user can see when a large download is being prepared.
 - Keeps the stack small and understandable with FastAPI, yt-dlp, and FFmpeg.
 
@@ -16,6 +20,7 @@ A clean local downloader for popular platforms like YouTube, Bilibili, TikTok, a
 
 - Popular platform support in one local UI
 - MP4 video and MP3 audio downloads
+- Playlist downloads packaged as ZIP archives
 - Format picker with resolution, bitrate, and size hints
 - High-resolution preparation flow for formats that require video/audio merging
 - Optional Chrome cookie import for restricted videos
@@ -43,7 +48,7 @@ The UI highlights these 10 popular platforms:
 </p>
 
 <p align="center">
-  <em>Landing screen with the URL input, top-10 popular platform list, and MP4 or MP3 workflow.</em>
+  <em>Landing screen with the URL field, platform highlights, and the single-video or playlist download entry point.</em>
 </p>
 
 <p align="center">
@@ -51,7 +56,7 @@ The UI highlights these 10 popular platforms:
 </p>
 
 <p align="center">
-  <em>High-resolution preparation flow before the final browser save step.</em>
+  <em>Single-video workflow with format selection, preparation progress, and the final save step.</em>
 </p>
 
 ## Open Source Projects Used
@@ -85,7 +90,8 @@ Then open `http://127.0.0.1:8000` in your browser.
 
 ## Notes
 
-- MP4 options list formats that include both video and audio for streaming.
+- Single-video MP4 options list formats that include both video and audio for streaming.
+- Playlist downloads are packaged as ZIP archives after yt-dlp finishes downloading the full collection.
 - MP3 downloads are transcoded with FFmpeg at the selected bitrate.
 - The backend may still work with other yt-dlp-compatible URLs, but the UI and README only highlight the 10 most popular platforms above.
 - If YouTube shows a "confirm you're not a bot" error, enable "Use Chrome cookies". Chrome must be closed; you can also enable "Auto-close Chrome".

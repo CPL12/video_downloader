@@ -17,16 +17,16 @@
   <main class="shell">
     <header class="hero">
       <h1>Local Media Downloader</h1>
-      <p>Fetch formats and download MP4 or MP3 from a clean local UI built around popular video platforms.</p>
+      <p>Fetch formats and download single videos or full playlists as MP4 or MP3 from a clean local UI built around popular platforms.</p>
     </header>
 
     <section class="panel">
       <div class="field">
-        <label for="urlInput">Media URL</label>
+        <label for="urlInput">Media or Playlist URL</label>
         <input
           id="urlInput"
           type="text"
-          placeholder="Paste a media URL supported by yt-dlp"
+          placeholder="Paste a video or playlist URL supported by yt-dlp"
           autocomplete="off"
         />
       </div>
@@ -64,7 +64,7 @@
         <div id="mp4Options" class="option-list"></div>
 
         <div id="mp3Options" class="hidden">
-          <label for="mp3Quality">MP3 quality</label>
+          <label id="mp3QualityLabel" for="mp3Quality">MP3 quality</label>
           <select id="mp3Quality"></select>
         </div>
 
@@ -96,10 +96,11 @@
       <input type="hidden" name="height" />
       <input type="hidden" name="audio_quality" />
       <input type="hidden" name="title" />
+      <input type="hidden" name="is_playlist" />
     </form>
   </main>
 
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=9"></script>
 </body>
 
 </html>

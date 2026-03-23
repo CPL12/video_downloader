@@ -6,14 +6,17 @@ import sys
 import threading
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request as UrlRequest, urlopen
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Form, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -30,6 +33,7 @@ ALLOWED_AUDIO_QUALITIES = [128, 192, 256, 320]
 ALLOWED_COOKIE_SOURCES = {"chrome"}
 MAX_STDERR_BYTES = 65536
 CHROME_COOKIE_LOCK = "Could not copy Chrome cookie database"
+PLAYLIST_MP4_HEIGHTS = [2160, 1440, 1080, 720, 480, 360]
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -160,6 +164,66 @@ def build_cached_mp4_filename(title: str, format_id: str, height: str | None = N
     return f"{' '.join(parts)}.mp4"
 
 
+def is_playlist_metadata(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("_type") == "playlist":
+        return True
+    return bool(data.get("entries"))
+
+
+def count_playlist_entries(data: dict) -> int:
+    return sum(1 for entry in (data.get("entries") or []) if entry)
+
+
+def build_playlist_mp4_options() -> list[dict]:
+    return [
+        {
+            "format_id": str(height),
+            "height": height,
+            "fps": None,
+            "tbr": None,
+            "filesize": None,
+            "need_merge": False,
+        }
+        for height in PLAYLIST_MP4_HEIGHTS
+    ]
+
+
+def build_playlist_archive_filename(title: str, media_type: str, quality_label: str | None = None) -> str:
+    label_parts = ["Playlist", media_type.upper()]
+    if quality_label:
+        label_parts.append(quality_label)
+    return build_download_filename(title, "zip", " ".join(label_parts))
+
+
+def build_playlist_mp4_selector(height: str | int | None) -> str:
+    try:
+        max_height = int(str(height or "").strip())
+    except ValueError:
+        max_height = 1080
+
+    return (
+        f"bv*[ext=mp4][height<={max_height}]+ba[ext=m4a]/"
+        f"bv*[height<={max_height}]+ba/"
+        f"b[ext=mp4][height<={max_height}]/"
+        f"b[height<={max_height}]/"
+        "b"
+    )
+
+
+def zip_directory(source_dir: Path, archive_path: Path):
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_path in sorted(source_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            archive.write(file_path, file_path.relative_to(source_dir.parent))
+
+
+def list_files_in_directory(source_dir: Path) -> list[Path]:
+    return [path for path in sorted(source_dir.rglob("*")) if path.is_file()]
+
+
 def parse_bool(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -204,6 +268,8 @@ def run_yt_dlp_json(
     url: str,
     cookie_source: str | None = None,
     auto_close_chrome: bool = False,
+    allow_playlist: bool = False,
+    flat_playlist: bool = False,
 ) -> dict:
     if cookie_source and auto_close_chrome:
         close_chrome_processes()
@@ -212,13 +278,14 @@ def run_yt_dlp_json(
         "-m",
         "yt_dlp",
         "-J",
-        "--no-playlist",
         "--no-warnings",
         "--no-progress",
         "--js-runtimes",
         "node",
         "--remote-components",
         "ejs:github",
+        *(["--flat-playlist"] if flat_playlist else []),
+        *(["--yes-playlist"] if allow_playlist else ["--no-playlist"]),
         *cookie_args(cookie_source),
         url,
     ]
@@ -376,6 +443,51 @@ def stream_pipeline(ydl_cmd: list[str], ffmpeg_cmd: list[str], media_type: str, 
 def generate_task_id(url: str, format_id: str) -> str:
     import hashlib
     return hashlib.md5(f"{url}_{format_id}".encode()).hexdigest()
+
+
+def generate_playlist_task_id(
+    url: str,
+    dtype: str,
+    height: str | None = None,
+    audio_quality: str | None = None,
+) -> str:
+    selector = f"playlist:{dtype}:{height or ''}:{audio_quality or ''}"
+    return generate_task_id(url, selector)
+
+
+def parse_playlist_download_status(line: str):
+    item_match = re.search(r"\[download\]\s+Downloading item (\d+) of (\d+)", line)
+    if item_match:
+        return {
+            "current_item": int(item_match.group(1)),
+            "total_items": int(item_match.group(2)),
+            "item_progress": 0.0,
+        }
+
+    total_match = re.search(r"Playlist .*: Downloading (\d+) items of (\d+)", line)
+    if total_match:
+        return {
+            "current_item": 0,
+            "total_items": int(total_match.group(2)),
+            "item_progress": 0.0,
+        }
+
+    return None
+
+
+def compute_playlist_overall_progress(
+    current_item: int,
+    total_items: int,
+    item_progress: float,
+    download_weight: float = 95.0,
+) -> float:
+    if total_items <= 0:
+        return 0.0
+
+    bounded_item_progress = max(0.0, min(item_progress, 100.0))
+    completed_items = max(current_item - 1, 0)
+    combined = (completed_items + (bounded_item_progress / 100.0)) / total_items
+    return max(0.0, min(combined * download_weight, download_weight))
 
 def parse_download_progress(line: str):
     """
@@ -791,6 +903,293 @@ def stream_remote_file(download_url: str, media_type: str, filename: str):
     return StreamingResponse(iterator(), media_type=resolved_media_type, headers=headers)
 
 
+def build_playlist_download_job(
+    title: str,
+    dtype: str,
+    height: str | None,
+    audio_quality: str | None,
+    cookie_source: str | None,
+) -> dict[str, str | list[str]]:
+    if dtype == "mp4":
+        if not shutil.which("ffmpeg"):
+            raise HTTPException(status_code=500, detail="ffmpeg was not found on PATH.")
+        quality_label = build_quality_label(height=height or "1080")
+        return {
+            "filename": build_playlist_archive_filename(title, "mp4", quality_label),
+            "ydl_cmd": [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "--yes-playlist",
+                "--no-part",
+                "--newline",
+                "--concurrent-fragments", "5",
+                "--merge-output-format", "mp4",
+                "-f", build_playlist_mp4_selector(height),
+                "--js-runtimes", "node",
+                "--remote-components", "ejs:github",
+                *cookie_args(cookie_source),
+            ],
+        }
+
+    if dtype == "mp3":
+        try:
+            quality = int(audio_quality)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="audio_quality must be a number.")
+        if quality not in ALLOWED_AUDIO_QUALITIES:
+            raise HTTPException(status_code=400, detail="Invalid audio quality.")
+        if not shutil.which("ffmpeg"):
+            raise HTTPException(status_code=500, detail="ffmpeg was not found on PATH.")
+
+        quality_label = build_quality_label(audio_quality=quality)
+        return {
+            "filename": build_playlist_archive_filename(title, "mp3", quality_label),
+            "ydl_cmd": [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+                "--yes-playlist",
+                "--no-part",
+                "--newline",
+                "--extract-audio",
+                "--audio-format", "mp3",
+                "--audio-quality", f"{quality}K",
+                "--js-runtimes", "node",
+                "--remote-components", "ejs:github",
+                *cookie_args(cookie_source),
+            ],
+        }
+
+    raise HTTPException(status_code=400, detail="type must be mp4 or mp3.")
+
+
+def zip_directory_with_progress(task_id: str, source_dir: Path, archive_path: Path) -> list[Path]:
+    files = list_files_in_directory(source_dir)
+    if not files:
+        raise RuntimeError("No playlist items were downloaded.")
+
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        total_files = len(files)
+        for index, file_path in enumerate(files, start=1):
+            archive.write(file_path, file_path.relative_to(source_dir.parent))
+            update_task(
+                task_id,
+                status="archiving",
+                phase="archive",
+                phase_label="Packaging ZIP",
+                progress=95.0 + ((index / total_files) * 5.0),
+                speed="",
+                eta="00:00",
+                message="Packaging playlist archive...",
+            )
+
+    return files
+
+
+def background_playlist_downloader(
+    task_id: str,
+    url: str,
+    title: str,
+    dtype: str,
+    height: str | None,
+    audio_quality: str | None,
+    filename: str,
+    cookies: str | None,
+    auto_close: bool,
+):
+    out_path = DOWNLOADS_DIR / filename
+    work_dir = TEMP_DOWNLOADS_DIR / task_id
+    playlist_dir = work_dir / sanitize_filename(title)
+    output_template = playlist_dir / "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s"
+    playlist_dir.mkdir(parents=True, exist_ok=True)
+
+    with active_tasks_lock:
+        active_tasks[task_id].update(
+            {
+                "status": "downloading",
+                "phase": "download",
+                "phase_label": "Downloading Playlist",
+                "filename": filename,
+                "task_id": task_id,
+                "message": "Preparing playlist download...",
+                "progress": 0.0,
+                "speed": "",
+                "eta": "unknown",
+            }
+        )
+
+    if cookies and auto_close:
+        close_chrome_processes()
+
+    try:
+        job = build_playlist_download_job(title, dtype, height, audio_quality, cookies)
+        cmd = [
+            *job["ydl_cmd"],
+            "--ignore-errors",
+            "-o", str(output_template),
+            url,
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        state = {
+            "current_item": 0,
+            "total_items": 0,
+            "item_progress": 0.0,
+            "speed": "",
+            "eta": "unknown",
+        }
+        last_error = ""
+
+        try:
+            for raw_line in proc.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                if line.startswith("ERROR:"):
+                    last_error = normalize_ydl_error(line.replace("ERROR:", "", 1).strip())
+
+                playlist_info = parse_playlist_download_status(line)
+                if playlist_info:
+                    state.update({k: v for k, v in playlist_info.items() if v is not None})
+
+                progress_info = parse_download_progress(line)
+                if progress_info:
+                    state["item_progress"] = progress_info.get("progress", state["item_progress"])
+                    state["speed"] = progress_info.get("speed", "")
+                    state["eta"] = progress_info.get("eta", "unknown")
+
+                if playlist_info or progress_info:
+                    current_item = state["current_item"]
+                    total_items = state["total_items"]
+                    message = "Preparing playlist download..."
+                    if total_items and current_item:
+                        message = f"Downloading item {current_item} of {total_items}..."
+                    elif total_items:
+                        message = f"Queued {total_items} playlist items..."
+
+                    update_task(
+                        task_id,
+                        status="downloading",
+                        phase="download",
+                        phase_label="Downloading Playlist",
+                        progress=compute_playlist_overall_progress(
+                            state["current_item"],
+                            state["total_items"],
+                            state["item_progress"],
+                        ),
+                        speed=state["speed"],
+                        eta=state["eta"],
+                        message=message,
+                    )
+        finally:
+            proc.wait()
+
+        downloaded_files = list_files_in_directory(playlist_dir)
+        if proc.returncode != 0 and not downloaded_files:
+            raise RuntimeError(last_error or "Failed to download playlist.")
+        if not downloaded_files:
+            raise RuntimeError("No playlist items were downloaded.")
+
+        if out_path.exists():
+            out_path.unlink()
+
+        update_task(
+            task_id,
+            status="archiving",
+            phase="archive",
+            phase_label="Packaging ZIP",
+            progress=95.0,
+            speed="",
+            eta="00:00",
+            message="Packaging playlist archive...",
+        )
+        zipped_files = zip_directory_with_progress(task_id, playlist_dir, out_path)
+
+        total_items = state["total_items"] or len(zipped_files)
+        saved_items = len(zipped_files)
+        if saved_items < total_items:
+            ready_message = f"Playlist archive is ready. Saved {saved_items} of {total_items} available items."
+        else:
+            ready_message = "Playlist archive is ready to save."
+
+        update_task(
+            task_id,
+            status="finished",
+            phase="finished",
+            phase_label="Ready",
+            progress=100.0,
+            speed="",
+            eta="00:00",
+            filename=filename,
+            task_id=task_id,
+            message=ready_message,
+        )
+    except Exception as exc:
+        update_task(
+            task_id,
+            status="error",
+            phase="error",
+            phase_label="Error",
+            error=str(exc),
+            message=str(exc),
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def download_playlist_archive(
+    url: str,
+    title: str,
+    dtype: str,
+    height: str | None,
+    audio_quality: str | None,
+    cookie_source: str | None,
+    auto_close_chrome: bool,
+):
+    if cookie_source and auto_close_chrome:
+        close_chrome_processes()
+
+    job = build_playlist_download_job(title, dtype, height, audio_quality, cookie_source)
+    work_dir = TEMP_DOWNLOADS_DIR / f"playlist-{uuid4().hex}"
+    playlist_dir = work_dir / sanitize_filename(title)
+    playlist_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = work_dir / "playlist.zip"
+    output_template = playlist_dir / "%(playlist_index)03d - %(title)s [%(id)s].%(ext)s"
+
+    cmd = [
+        *job["ydl_cmd"],
+        "--ignore-errors",
+        "-o", str(output_template),
+        url,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    downloaded_files = list_files_in_directory(playlist_dir)
+    if proc.returncode != 0 and not downloaded_files:
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        message = err[-1] if err else "Failed to download playlist."
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=normalize_ydl_error(message))
+    if not downloaded_files:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise HTTPException(status_code=400, detail="No playlist items were downloaded.")
+
+    zip_directory(playlist_dir, archive_path)
+    return FileResponse(
+        path=archive_path,
+        media_type="application/zip",
+        filename=str(job["filename"]),
+        background=BackgroundTask(shutil.rmtree, work_dir, ignore_errors=True),
+    )
+
+
 
 
 @app.delete("/api/clear_temp")
@@ -832,6 +1231,24 @@ def get_formats(
 ):
     normalized = normalize_url(url)
     cookies_from_browser = (cookies_from_browser or "").strip() or None
+    probe = run_yt_dlp_json(
+        normalized,
+        cookies_from_browser,
+        auto_close_chrome,
+        allow_playlist=True,
+        flat_playlist=True,
+    )
+
+    if is_playlist_metadata(probe):
+        title = probe.get("title") or probe.get("playlist_title") or "playlist"
+        return {
+            "title": title,
+            "mp4": build_playlist_mp4_options(),
+            "mp3_qualities": ALLOWED_AUDIO_QUALITIES,
+            "is_playlist": True,
+            "entry_count": count_playlist_entries(probe),
+        }
+
     data = run_yt_dlp_json(normalized, cookies_from_browser, auto_close_chrome)
 
     mp4_formats = pick_mp4_formats(data.get("formats") or [])
@@ -841,6 +1258,8 @@ def get_formats(
         "title": title,
         "mp4": mp4_formats,
         "mp3_qualities": ALLOWED_AUDIO_QUALITIES,
+        "is_playlist": False,
+        "entry_count": 1,
     }
 
 
@@ -921,6 +1340,98 @@ def prepare(
         return active_tasks[task_id]
 
 
+@app.get("/api/prepare_playlist")
+def prepare_playlist(
+    url: str,
+    type: str,
+    background_tasks: BackgroundTasks,
+    title: str = "playlist",
+    height: str | None = None,
+    audio_quality: str | None = None,
+    cookies_from_browser: str | None = None,
+    auto_close_chrome: str | None = None,
+):
+    normalized = normalize_url(url)
+    dtype = type.lower()
+    cookies_source = (cookies_from_browser or "").strip() or None
+    should_close = parse_bool(auto_close_chrome)
+    task_id = generate_playlist_task_id(normalized, dtype, height, audio_quality)
+    filename = str(
+        build_playlist_download_job(title, dtype, height, audio_quality, cookies_source)["filename"]
+    )
+
+    with active_tasks_lock:
+        existing = active_tasks.get(task_id)
+        if existing and existing.get("status") == "finished":
+            existing_filename = existing.get("filename")
+            if not existing_filename or not (DOWNLOADS_DIR / existing_filename).exists():
+                del active_tasks[task_id]
+        elif existing and existing.get("status") == "error":
+            del active_tasks[task_id]
+
+        if task_id not in active_tasks:
+            if (DOWNLOADS_DIR / filename).exists():
+                active_tasks[task_id] = {
+                    "status": "finished",
+                    "phase": "finished",
+                    "phase_label": "Ready",
+                    "progress": 100.0,
+                    "speed": "",
+                    "eta": "00:00",
+                    "filename": filename,
+                    "task_id": task_id,
+                    "message": "Playlist archive is ready to save.",
+                }
+            else:
+                active_tasks[task_id] = {
+                    "status": "pending",
+                    "phase": "pending",
+                    "phase_label": "Queued",
+                    "progress": 0.0,
+                    "speed": "",
+                    "eta": "unknown",
+                    "filename": filename,
+                    "task_id": task_id,
+                    "message": "Waiting to start playlist download...",
+                }
+                background_tasks.add_task(
+                    background_playlist_downloader,
+                    task_id,
+                    normalized,
+                    title,
+                    dtype,
+                    height,
+                    audio_quality,
+                    filename,
+                    cookies_source,
+                    should_close,
+                )
+
+        return active_tasks[task_id]
+
+
+@app.get("/api/download_prepared")
+def download_prepared(task_id: str):
+    with active_tasks_lock:
+        task = active_tasks.get(task_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Download task was not found.")
+    if task.get("status") != "finished":
+        raise HTTPException(status_code=409, detail="Download is not ready yet.")
+
+    filename = task.get("filename")
+    if not filename:
+        raise HTTPException(status_code=404, detail="Prepared file is missing.")
+
+    file_path = DOWNLOADS_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Prepared file no longer exists.")
+
+    media_type = "application/zip" if file_path.suffix.lower() == ".zip" else "application/octet-stream"
+    return FileResponse(path=file_path, filename=filename, media_type=media_type)
+
+
 @app.post("/api/download")
 def download(
     url: str = Form(...),
@@ -929,6 +1440,7 @@ def download(
     format_id: str = Form(None),
     height: str | None = Form(None),
     audio_quality: str = Form(None),
+    is_playlist: str | None = Form(None),
     cookies_from_browser: str = Form(None),
     auto_close_chrome: str = Form(None),
 ):
@@ -936,6 +1448,17 @@ def download(
     dtype = type.lower()
     cookies_source = (cookies_from_browser or "").strip() or None
     should_close_chrome = parse_bool(auto_close_chrome)
+    if parse_bool(is_playlist):
+        return download_playlist_archive(
+            normalized_url,
+            title,
+            dtype,
+            height,
+            audio_quality,
+            cookies_source,
+            should_close_chrome,
+        )
+
     if dtype == "mp4":
         if not format_id:
             raise HTTPException(status_code=400, detail="format_id is required for mp4.")

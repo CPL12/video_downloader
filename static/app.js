@@ -6,6 +6,8 @@ const formatsPanel = document.getElementById("formatsPanel");
 const mp4Options = document.getElementById("mp4Options");
 const mp3Options = document.getElementById("mp3Options");
 const mp3Quality = document.getElementById("mp3Quality");
+const mp3QualityLabel =
+  document.getElementById("mp3QualityLabel") || document.querySelector("label[for='mp3Quality']");
 const downloadBtn = document.getElementById("downloadBtn");
 const titleHeading = document.getElementById("titleHeading");
 const downloadForm = document.getElementById("downloadForm");
@@ -20,6 +22,8 @@ const platformExamples = document.getElementById("platformExamples");
 let currentData = null;
 let downloadState = "idle";
 let prepareAbort = null;
+let playlistTaskId = null;
+let playlistTaskSignature = "";
 const pageParams = new URLSearchParams(window.location.search);
 const demoMode = pageParams.get("demo");
 const POPULAR_PLATFORMS = [
@@ -47,6 +51,12 @@ function setStatus(message, kind = "info") {
   }
   statusEl.className = `status ${kind}`;
   statusEl.textContent = message;
+}
+
+function setElementText(element, text) {
+  if (element) {
+    element.textContent = text;
+  }
 }
 
 function formatBytes(bytes) {
@@ -94,6 +104,26 @@ function resetDownloadButton() {
   downloadState = "idle";
 }
 
+function triggerPreparedDownload(taskId, filename = "") {
+  const link = document.createElement("a");
+  link.href = `/api/download_prepared?task_id=${encodeURIComponent(taskId)}`;
+  if (filename) {
+    link.download = filename;
+  }
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function buildFormSignature(formData) {
+  const params = new URLSearchParams();
+  for (const [name, value] of formData.entries()) {
+    params.set(name, value);
+  }
+  return params.toString();
+}
+
 function renderPlatformExamples(platforms) {
   platformExamples.innerHTML = "";
 
@@ -111,7 +141,7 @@ function showPopularPlatforms() {
     "Works well with these common platforms. Other yt-dlp-compatible URLs may also work.";
 }
 
-function renderMp4Options(formats) {
+function renderMp4Options(formats, isPlaylist = false) {
   mp4Options.innerHTML = "";
 
   if (!formats || formats.length === 0) {
@@ -122,6 +152,10 @@ function renderMp4Options(formats) {
     return;
   }
 
+  const defaultHeight = isPlaylist && formats.some((fmt) => Number(fmt.height) === 720)
+    ? 720
+    : Number(formats[0].height || 0);
+
   formats.forEach((fmt, index) => {
     const option = document.createElement("label");
     option.className = "option";
@@ -131,7 +165,9 @@ function renderMp4Options(formats) {
     input.name = "mp4Format";
     input.value = fmt.format_id;
     input.dataset.height = fmt.height || "";
-    if (index === 0) input.checked = true;
+    if ((isPlaylist && Number(fmt.height) === defaultHeight) || (!isPlaylist && index === 0)) {
+      input.checked = true;
+    }
 
     const body = document.createElement("div");
     const title = document.createElement("div");
@@ -141,12 +177,16 @@ function renderMp4Options(formats) {
 
     const meta = document.createElement("div");
     meta.className = "option-meta";
-    const size = formatBytes(fmt.filesize);
-    const bitrate = fmt.tbr ? `${Math.round(fmt.tbr)} kbps` : "";
-
-    let metaText = [size, bitrate].filter(Boolean).join(" | ");
-    if (fmt.need_merge) {
-      metaText += " (High Quality)";
+    let metaText = "";
+    if (isPlaylist) {
+      metaText = `Best available up to ${fmt.height}p for each playlist item`;
+    } else {
+      const size = formatBytes(fmt.filesize);
+      const bitrate = fmt.tbr ? `${Math.round(fmt.tbr)} kbps` : "";
+      metaText = [size, bitrate].filter(Boolean).join(" | ");
+      if (fmt.need_merge) {
+        metaText += " (High Quality)";
+      }
     }
     meta.textContent = metaText;
 
@@ -189,6 +229,8 @@ async function fetchFormats() {
     return;
   }
 
+  playlistTaskId = null;
+  playlistTaskSignature = "";
   setStatus("Fetching available formats...", "info");
   formatsPanel.classList.add("hidden");
   stopPreparation();
@@ -205,22 +247,36 @@ async function fetchFormats() {
     const data = await response.json();
     currentData = data;
 
-    titleHeading.textContent = `Available formats for: ${data.title}`;
-    renderMp4Options(data.mp4);
+    if (data.is_playlist) {
+      const countLabel = data.entry_count === 1 ? "1 item" : `${data.entry_count} items`;
+      setElementText(titleHeading, `Playlist: ${data.title} (${countLabel})`);
+      setElementText(mp3QualityLabel, "MP3 quality for ZIP archive");
+      renderMp4Options(data.mp4, true);
+      setStatus("Playlist loaded. The download will be packaged as a ZIP archive.", "info");
+    } else {
+      setElementText(titleHeading, `Available formats for: ${data.title}`);
+      setElementText(mp3QualityLabel, "MP3 quality");
+      renderMp4Options(data.mp4, false);
+      setStatus("Formats loaded. Pick your quality and download.", "info");
+    }
     renderMp3Options(data.mp3_qualities || []);
     formatsPanel.classList.remove("hidden");
     updateTypeView();
-    setStatus("Formats loaded. Pick your quality and download.", "info");
   } catch (error) {
     setStatus(error.message || "Failed to load formats.", "error");
   }
 }
 
 function fillFormFields(formData) {
-  for (const field of downloadForm.elements) {
-    if (field.name && formData.has(field.name)) {
-      field.value = formData.get(field.name);
+  for (const [name, value] of formData.entries()) {
+    let field = downloadForm.querySelector(`[name="${name}"]`);
+    if (!field) {
+      field = document.createElement("input");
+      field.type = "hidden";
+      field.name = name;
+      downloadForm.appendChild(field);
     }
+    field.value = value;
   }
 }
 
@@ -231,6 +287,7 @@ function buildFormData() {
   formData.set("url", url);
   formData.set("type", type);
   formData.set("title", currentData.title || "download");
+  formData.set("is_playlist", currentData.is_playlist ? "true" : "");
 
   if (type === "mp4") {
     const selectedInput = document.querySelector("input[name='mp4Format']:checked");
@@ -244,6 +301,85 @@ function buildFormData() {
     formData.set("audio_quality", mp3Quality.value);
   }
   return formData;
+}
+
+async function startPlaylistPreparation(formData) {
+  const signature = buildFormSignature(formData);
+  const params = new URLSearchParams(signature);
+  playlistTaskId = null;
+  playlistTaskSignature = signature;
+  downloadState = "preparing";
+  prepareAbort = new AbortController();
+
+  downloadBtn.textContent = "Stop Preparation";
+  downloadBtn.classList.add("stop");
+  downloadBtn.classList.remove("ready");
+  downloadBtn.disabled = false;
+
+  showProgress(0, "", "", "Preparing Playlist", "Waiting to start playlist download...");
+
+  try {
+    while (true) {
+      const response = await fetch(`/api/prepare_playlist?${params.toString()}`, {
+        signal: prepareAbort.signal,
+      });
+      if (!response.ok) {
+        let message = "Playlist preparation request failed";
+        try {
+          const err = await response.json();
+          message = err.detail || message;
+        } catch {
+          // Ignore JSON parse errors for non-JSON responses.
+        }
+        throw new Error(message);
+      }
+
+      const status = await response.json();
+      if (status.task_id) {
+        playlistTaskId = status.task_id;
+      }
+
+      if (status.status === "finished") {
+        downloadState = "ready";
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = "Download Ready - Click to Save";
+        downloadBtn.classList.remove("stop");
+        downloadBtn.classList.add("ready");
+
+        showProgress(100, "", "", status.phase_label || "Ready", status.message || "");
+        setStatus(status.message || "Playlist archive is ready. Click the button to save it.", "info");
+        return;
+      }
+
+      if (status.status === "error") {
+        throw new Error(status.error || status.message || "Playlist preparation failed");
+      }
+
+      const isArchiving = status.phase === "archive";
+      downloadBtn.textContent = isArchiving ? "Packaging Playlist ZIP..." : "Stop Preparation";
+      downloadBtn.disabled = isArchiving;
+      downloadBtn.classList.toggle("stop", !isArchiving);
+
+      showProgress(
+        status.progress || 0,
+        status.progress >= 100 ? "" : status.speed || "",
+        status.eta || "",
+        status.phase_label || "Preparing Playlist",
+        status.message || ""
+      );
+      setStatus(status.message || "Preparing playlist archive...", "info");
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  } catch (err) {
+    if (err.name === "AbortError") {
+      setStatus("Preparation stopped by user.", "info");
+    } else {
+      setStatus(err.message || "Playlist preparation failed.", "error");
+    }
+    resetDownloadButton();
+    hideProgress();
+  }
 }
 
 async function startPreparation(url, formatId, title, height) {
@@ -340,6 +476,26 @@ function triggerDownload() {
   }
 
   if (downloadState === "ready") {
+    if (currentData.is_playlist) {
+      const formData = buildFormData();
+      if (!formData) {
+        setStatus("Select a format.", "error");
+        return;
+      }
+      const currentSignature = buildFormSignature(formData);
+      if (currentSignature !== playlistTaskSignature) {
+        startPlaylistPreparation(formData);
+        return;
+      }
+      if (!playlistTaskId) {
+        setStatus("Playlist archive is not ready yet.", "error");
+        return;
+      }
+      setStatus("Download starting - your browser will save the playlist ZIP.", "info");
+      triggerPreparedDownload(playlistTaskId, currentData.title || "playlist");
+      return;
+    }
+
     const formData = buildFormData();
     if (!formData) {
       setStatus("Select an MP4 resolution.", "error");
@@ -353,8 +509,18 @@ function triggerDownload() {
     return;
   }
 
+  if (currentData.is_playlist) {
+    const formData = buildFormData();
+    if (!formData) {
+      setStatus("Select a format.", "error");
+      return;
+    }
+    startPlaylistPreparation(formData);
+    return;
+  }
+
   const type = document.querySelector("input[name='downloadType']:checked").value;
-  if (type === "mp4") {
+  if (!currentData.is_playlist && type === "mp4") {
     const selectedInput = document.querySelector("input[name='mp4Format']:checked");
     if (!selectedInput) {
       setStatus("Select an MP4 resolution.", "error");
@@ -375,7 +541,11 @@ function triggerDownload() {
     return;
   }
   fillFormFields(formData);
-  setStatus("Download starting - your browser or download manager will handle it.", "info");
+  if (currentData.is_playlist) {
+    setStatus("Playlist download is being built as a ZIP archive. Your browser will save it when it is ready.", "info");
+  } else {
+    setStatus("Download starting - your browser or download manager will handle it.", "info");
+  }
   downloadForm.submit();
 }
 
@@ -397,6 +567,8 @@ function applyDemoState() {
     urlInput.value = "https://www.bilibili.com/video/BV1xx411c7mD";
     currentData = {
       title: "Sunset City Session",
+      is_playlist: false,
+      entry_count: 1,
       mp4: [
         { format_id: "137", height: 1080, fps: 60, tbr: 5820, filesize: 148897792, need_merge: true },
         { format_id: "22", height: 720, fps: 30, tbr: 2100, filesize: 50331648, need_merge: false },
@@ -405,7 +577,7 @@ function applyDemoState() {
       mp3_qualities: [128, 192, 256, 320],
     };
 
-    titleHeading.textContent = `Available formats for: ${currentData.title}`;
+    setElementText(titleHeading, `Available formats for: ${currentData.title}`);
     renderMp4Options(currentData.mp4);
     renderMp3Options(currentData.mp3_qualities);
     formatsPanel.classList.remove("hidden");
@@ -429,6 +601,9 @@ clearBtn.addEventListener("click", () => {
   urlInput.value = "";
   formatsPanel.classList.add("hidden");
   currentData = null;
+  playlistTaskId = null;
+  playlistTaskSignature = "";
+  setElementText(mp3QualityLabel, "MP3 quality");
   stopPreparation();
   resetDownloadButton();
   hideProgress();
