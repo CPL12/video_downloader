@@ -5,11 +5,14 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlparse
+from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import FastAPI, HTTPException, Request, Form, BackgroundTasks
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 APP_DIR = Path(__file__).resolve().parent
@@ -27,6 +30,15 @@ ALLOWED_AUDIO_QUALITIES = [128, 192, 256, 320]
 ALLOWED_COOKIE_SOURCES = {"chrome"}
 MAX_STDERR_BYTES = 65536
 CHROME_COOKIE_LOCK = "Could not copy Chrome cookie database"
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *{f"COM{i}" for i in range(1, 10)},
+    *{f"LPT{i}" for i in range(1, 10)},
+}
+MAX_FILENAME_STEM_LENGTH = 180
 
 app = FastAPI(title="Local Media Downloader")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -90,9 +102,62 @@ def normalize_url(raw_url: str) -> str:
 
 
 def sanitize_filename(value: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9 _.-]", "_", value or "")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = unicodedata.normalize("NFKC", value or "")
+    cleaned = re.sub(r"[\x00-\x1f]", "", cleaned)
+    cleaned = re.sub(r'[<>:"/\\|?*]+', " - ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    cleaned = cleaned[:MAX_FILENAME_STEM_LENGTH].rstrip(" .")
+    if cleaned.upper() in WINDOWS_RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
     return cleaned or "download"
+
+
+def ascii_filename(value: str) -> str:
+    cleaned = unicodedata.normalize("NFKD", value or "")
+    cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
+    cleaned = re.sub(r'[^a-zA-Z0-9 _.-]+', " - ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or "download"
+
+
+def build_attachment_headers(filename: str) -> dict[str, str]:
+    fallback = ascii_filename(filename)
+    encoded = quote(filename, safe="")
+    return {
+        "Content-Disposition": f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}',
+        "Cache-Control": "no-store",
+    }
+
+
+def build_quality_label(height: str | int | None = None, audio_quality: int | None = None) -> str | None:
+    if height:
+        height_text = str(height).strip()
+        if height_text.lower().endswith("p"):
+            height_text = height_text[:-1]
+        if height_text:
+            return f"{height_text}p"
+    if audio_quality:
+        return f"{audio_quality}kbps"
+    return None
+
+
+def build_download_filename(title: str, extension: str, quality_label: str | None = None) -> str:
+    base = sanitize_filename(title)
+    ext = extension.lstrip(".").lower() or "bin"
+    if quality_label:
+        return f"{base} ({sanitize_filename(quality_label)}).{ext}"
+    return f"{base}.{ext}"
+
+
+def build_cached_mp4_filename(title: str, format_id: str, height: str | None = None) -> str:
+    base = sanitize_filename(title)
+    format_label = sanitize_filename(format_id).replace(" ", "_")
+    quality_label = build_quality_label(height=height)
+    parts = [base]
+    if quality_label:
+        parts.append(f"({quality_label})")
+    parts.append(f"[{format_label}]")
+    return f"{' '.join(parts)}.mp4"
 
 
 def parse_bool(value) -> bool:
@@ -304,10 +369,7 @@ def stream_pipeline(ydl_cmd: list[str], ffmpeg_cmd: list[str], media_type: str, 
             except Exception:
                 pass
 
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Cache-Control": "no-store",
-    }
+    headers = build_attachment_headers(filename)
     return StreamingResponse(iterator(), media_type=media_type, headers=headers)
 
 
@@ -699,11 +761,34 @@ def stream_merging(video_url: str, audio_url: str, filename: str):
             except Exception:
                 pass
 
-    headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
-        "Cache-Control": "no-store",
-    }
+    headers = build_attachment_headers(filename)
     return StreamingResponse(iterator(), media_type="video/mp4", headers=headers)
+
+
+def stream_remote_file(download_url: str, media_type: str, filename: str):
+    try:
+        upstream = urlopen(UrlRequest(download_url, headers={"User-Agent": "Mozilla/5.0"}), timeout=30)
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Upstream download failed with HTTP {exc.code}.") from exc
+    except URLError as exc:
+        reason = exc.reason if isinstance(exc.reason, str) else str(exc.reason)
+        raise HTTPException(status_code=502, detail=f"Upstream download failed: {reason}") from exc
+
+    headers = build_attachment_headers(filename)
+    content_length = upstream.headers.get("Content-Length")
+    if content_length:
+        headers["Content-Length"] = content_length
+
+    def iterator():
+        with upstream:
+            while True:
+                chunk = upstream.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+
+    resolved_media_type = media_type or upstream.headers.get_content_type() or "application/octet-stream"
+    return StreamingResponse(iterator(), media_type=resolved_media_type, headers=headers)
 
 
 
@@ -784,6 +869,7 @@ def prepare(
     format_id: str,
     background_tasks: BackgroundTasks,
     title: str = "video",
+    height: str | None = None,
     cookies_from_browser: str | None = None,
     auto_close_chrome: str | None = None
 ):
@@ -802,8 +888,7 @@ def prepare(
         
         # PERSISTENCE CHECK: If not in active_tasks, check if file already exists on disk
         if task_id not in active_tasks:
-            safe_title = sanitize_filename(title)
-            filename = f"{safe_title}_{format_id}.mp4"
+            filename = build_cached_mp4_filename(title, format_id, height)
             if (DOWNLOADS_DIR / filename).exists():
                 active_tasks[task_id] = {
                     "status": "finished",
@@ -842,7 +927,7 @@ def download(
     type: str = Form(...),
     title: str = Form("download"),
     format_id: str = Form(None),
-    height: str = Form(None),
+    height: str | None = Form(None),
     audio_quality: str = Form(None),
     cookies_from_browser: str = Form(None),
     auto_close_chrome: str = Form(None),
@@ -851,11 +936,10 @@ def download(
     dtype = type.lower()
     cookies_source = (cookies_from_browser or "").strip() or None
     should_close_chrome = parse_bool(auto_close_chrome)
-    safe_title = sanitize_filename(title)
-
     if dtype == "mp4":
         if not format_id:
             raise HTTPException(status_code=400, detail="format_id is required for mp4.")
+        download_filename = build_download_filename(title, "mp4", build_quality_label(height=height))
             
         # Check if we have a prepared file for this
         task_id = generate_task_id(normalized_url, str(format_id))
@@ -868,14 +952,14 @@ def download(
         
         # If not in active_tasks (e.g. server restart), we try to reconstruct the filename
         if not filename:
-             filename = f"{safe_title}_{format_id}.mp4"
+            filename = build_cached_mp4_filename(title, format_id, height)
              
         if filename:
             file_path = DOWNLOADS_DIR / filename
             if file_path.exists():
                 return FileResponse(
                     path=file_path,
-                    filename=f"{safe_title}.mp4",
+                    filename=download_filename,
                     media_type="video/mp4"
                 )
 
@@ -902,21 +986,19 @@ def download(
                 audio_fmts = [f for f in formats if f.get("vcodec") == "none"]
             
             if not audio_fmts:
-                return RedirectResponse(url=video_url, status_code=303)
+                return stream_remote_file(video_url, "video/mp4", download_filename)
                 
             best_audio = max(audio_fmts, key=lambda f: f.get("tbr") or 0)
             audio_url = best_audio.get("url") or get_direct_url(
                 normalized_url, best_audio["format_id"], cookies_source, should_close_chrome
             )
             
-            height_val = target_fmt.get("height") or "highres"
-            return stream_merging(video_url, audio_url, f"{safe_title}.mp4")
+            return stream_merging(video_url, audio_url, download_filename)
         else:
-            # Progressive, just redirect
             direct = target_fmt.get("url") or get_direct_url(
                 normalized_url, str(format_id), cookies_source, should_close_chrome
             )
-            return RedirectResponse(url=direct, status_code=303)
+            return stream_remote_file(direct, target_fmt.get("mime_type") or "video/mp4", download_filename)
 
 
 
@@ -966,7 +1048,8 @@ def download(
             "mp3",
             "pipe:1",
         ]
-        return stream_pipeline(ydl_cmd, ffmpeg_cmd, "audio/mpeg", f"{safe_title}.mp3")
+        download_filename = build_download_filename(title, "mp3", build_quality_label(audio_quality=quality))
+        return stream_pipeline(ydl_cmd, ffmpeg_cmd, "audio/mpeg", download_filename)
 
     raise HTTPException(status_code=400, detail="type must be mp4 or mp3.")
 

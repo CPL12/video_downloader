@@ -236,19 +236,22 @@ function buildFormData() {
     const selectedInput = document.querySelector("input[name='mp4Format']:checked");
     if (!selectedInput) return null;
     formData.set("format_id", selectedInput.value);
+    formData.set("height", selectedInput.dataset.height || "");
     formData.set("audio_quality", "");
   } else {
     formData.set("format_id", "");
+    formData.set("height", "");
     formData.set("audio_quality", mp3Quality.value);
   }
   return formData;
 }
 
-async function startPreparation(url, formatId, title) {
+async function startPreparation(url, formatId, title, height) {
   const params = new URLSearchParams({
     url,
     format_id: formatId,
     title,
+    height: height || "",
   });
 
   downloadState = "preparing";
@@ -361,7 +364,7 @@ function triggerDownload() {
     const fmt = currentData.mp4.find((item) => item.format_id === formatId);
 
     if (fmt && fmt.need_merge) {
-      startPreparation(urlInput.value.trim(), formatId, currentData.title);
+      startPreparation(urlInput.value.trim(), formatId, currentData.title, fmt.height);
       return;
     }
   }
