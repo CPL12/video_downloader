@@ -80,13 +80,6 @@ body::before {
   letter-spacing: -0.02em;
 }
 
-.hero p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 1.1rem;
-  max-width: 640px;
-}
-
 .panel {
   background: var(--card);
   border: 1px solid var(--border);
@@ -159,15 +152,6 @@ button.stop {
 
 button.stop:hover {
   box-shadow: 0 16px 30px rgba(231, 76, 60, 0.4);
-}
-
-button.danger {
-  background: linear-gradient(120deg, #d94e1f, #c0392b);
-  box-shadow: 0 10px 25px rgba(217, 78, 31, 0.25);
-}
-
-button.danger:hover {
-  box-shadow: 0 16px 30px rgba(217, 78, 31, 0.35);
 }
 
 @keyframes pulse-ready {

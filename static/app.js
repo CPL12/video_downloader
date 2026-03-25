@@ -23,9 +23,49 @@ let playlistTaskId = null;
 let playlistTaskSignature = "";
 const pageParams = new URLSearchParams(window.location.search);
 const demoMode = pageParams.get("demo");
+const clientId = window.crypto?.randomUUID
+  ? window.crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let clientHeartbeatTimer = null;
+let clientSessionClosed = false;
 
 if (pageParams.get("theme") === "light") {
   document.documentElement.dataset.theme = "light";
+}
+
+function sendClientSignal(action, useBeacon = false) {
+  const payload = new URLSearchParams({ client_id: clientId });
+  const url = `/api/client/${action}`;
+
+  if (useBeacon && navigator.sendBeacon) {
+    return navigator.sendBeacon(url, payload);
+  }
+
+  return fetch(url, {
+    method: "POST",
+    body: payload,
+    keepalive: useBeacon,
+  });
+}
+
+function startClientSession() {
+  clientSessionClosed = false;
+  sendClientSignal("register").catch(() => {});
+  clientHeartbeatTimer = window.setInterval(() => {
+    sendClientSignal("ping").catch(() => {});
+  }, 30000);
+}
+
+function closeClientSession() {
+  if (clientSessionClosed) {
+    return;
+  }
+  clientSessionClosed = true;
+  if (clientHeartbeatTimer !== null) {
+    window.clearInterval(clientHeartbeatTimer);
+    clientHeartbeatTimer = null;
+  }
+  sendClientSignal("close", true);
 }
 
 function setStatus(message, kind = "info") {
@@ -586,5 +626,9 @@ Array.from(typeToggle.querySelectorAll("input")).forEach((input) => {
   input.addEventListener("change", updateTypeView);
 });
 
+window.addEventListener("pagehide", closeClientSession);
+window.addEventListener("beforeunload", closeClientSession);
+
+startClientSession();
 updateTypeView();
 applyDemoState();

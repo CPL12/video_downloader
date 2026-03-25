@@ -1,6 +1,8 @@
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -13,8 +15,8 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Form, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTMLResponse
+from fastapi import FastAPI, HTTPException, Form, BackgroundTasks
+from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -28,12 +30,25 @@ TEMP_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 # Tracks background preparation tasks: {task_id: {status, progress, speed, filename, etc.}}
 active_tasks = {}
 active_tasks_lock = threading.Lock()
+client_sessions = {}
+client_sessions_lock = threading.Lock()
+format_cache = {}
+format_cache_lock = threading.Lock()
+active_transfer_count = 0
+active_transfer_lock = threading.Lock()
+shutdown_state_lock = threading.Lock()
+shutdown_monitor_started = False
+auto_shutdown_armed = False
+shutdown_requested_at = None
+shutdown_in_progress = False
 
 ALLOWED_AUDIO_QUALITIES = [128, 192, 256, 320]
-ALLOWED_COOKIE_SOURCES = {"chrome"}
 MAX_STDERR_BYTES = 65536
-CHROME_COOKIE_LOCK = "Could not copy Chrome cookie database"
 PLAYLIST_MP4_HEIGHTS = [2160, 1440, 1080, 720, 480, 360]
+CLIENT_SESSION_TTL_SECONDS = 120
+AUTO_SHUTDOWN_GRACE_SECONDS = 5
+AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS = 2
+FORMAT_CACHE_TTL_SECONDS = 300
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -63,6 +78,7 @@ def cleanup_old_downloads():
 async def startup_event():
     # Run cleanup on startup
     cleanup_old_downloads()
+    start_auto_shutdown_monitor()
 
 
 
@@ -232,47 +248,154 @@ def parse_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def close_chrome_processes():
-    if sys.platform != "win32":
-        return
-    subprocess.run(
-        ["taskkill", "/F", "/IM", "chrome.exe", "/T"],
-        capture_output=True,
-        text=True,
-    )
+def get_live_client_count(now: float | None = None) -> int:
+    current_time = now or time.time()
+    with client_sessions_lock:
+        stale_clients = [
+            client_id
+            for client_id, last_seen in client_sessions.items()
+            if (current_time - last_seen) > CLIENT_SESSION_TTL_SECONDS
+        ]
+        for client_id in stale_clients:
+            client_sessions.pop(client_id, None)
+        return len(client_sessions)
+
+
+def get_cached_formats(url: str) -> dict | None:
+    now = time.time()
+    with format_cache_lock:
+        stale_urls = [
+            cached_url
+            for cached_url, entry in format_cache.items()
+            if (now - entry["stored_at"]) > FORMAT_CACHE_TTL_SECONDS
+        ]
+        for cached_url in stale_urls:
+            format_cache.pop(cached_url, None)
+
+        entry = format_cache.get(url)
+        if not entry:
+            return None
+        return dict(entry["payload"])
+
+
+def set_cached_formats(url: str, payload: dict):
+    with format_cache_lock:
+        format_cache[url] = {
+            "stored_at": time.time(),
+            "payload": dict(payload),
+        }
+
+
+def has_running_tasks() -> bool:
+    with active_tasks_lock:
+        return any(
+            (task.get("status") or "pending") not in {"finished", "error"}
+            for task in active_tasks.values()
+        )
+
+
+def get_active_transfer_count() -> int:
+    with active_transfer_lock:
+        return active_transfer_count
+
+
+def increment_active_transfers():
+    global active_transfer_count
+    with active_transfer_lock:
+        active_transfer_count += 1
+
+
+def decrement_active_transfers():
+    global active_transfer_count
+    with active_transfer_lock:
+        active_transfer_count = max(0, active_transfer_count - 1)
+
+
+def mark_client_active(client_id: str):
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required.")
+
+    with client_sessions_lock:
+        client_sessions[client_id] = time.time()
+
+    with shutdown_state_lock:
+        global auto_shutdown_armed, shutdown_requested_at
+        auto_shutdown_armed = True
+        shutdown_requested_at = None
+
+
+def mark_client_closed(client_id: str):
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required.")
+
+    with client_sessions_lock:
+        client_sessions.pop(client_id, None)
+
+
+def request_process_shutdown():
+    global shutdown_in_progress
+    with shutdown_state_lock:
+        if shutdown_in_progress:
+            return
+        shutdown_in_progress = True
+
+    def _terminate():
+        time.sleep(0.2)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_terminate, daemon=True).start()
+
+
+def auto_shutdown_monitor():
+    global shutdown_requested_at
+
+    while True:
+        time.sleep(AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS)
+        now = time.time()
+        live_client_count = get_live_client_count(now)
+
+        with shutdown_state_lock:
+            if shutdown_in_progress:
+                return
+            if not auto_shutdown_armed:
+                continue
+            if live_client_count > 0:
+                shutdown_requested_at = None
+                continue
+            if shutdown_requested_at is None:
+                shutdown_requested_at = now
+            shutdown_started_at = shutdown_requested_at
+
+        if has_running_tasks() or get_active_transfer_count() > 0:
+            continue
+
+        if (now - shutdown_started_at) >= AUTO_SHUTDOWN_GRACE_SECONDS:
+            request_process_shutdown()
+            return
+
+
+def start_auto_shutdown_monitor():
+    global shutdown_monitor_started
+    with shutdown_state_lock:
+        if shutdown_monitor_started:
+            return
+        shutdown_monitor_started = True
+
+    threading.Thread(target=auto_shutdown_monitor, daemon=True).start()
 
 
 def normalize_ydl_error(message: str) -> str:
-    if CHROME_COOKIE_LOCK in message:
-        return (
-            "Chrome is running and its cookie database is locked. "
-            "Close Chrome completely (including background processes) or "
-            "enable Auto-close Chrome, then try again."
-        )
     lowered = message.lower()
     if "unsupported url" in lowered or "no suitable extractor" in lowered:
         return "This URL is not supported by the installed yt-dlp build."
     return message
 
 
-def cookie_args(cookie_source: str | None) -> list[str]:
-    if not cookie_source:
-        return []
-    source = cookie_source.strip().lower()
-    if source not in ALLOWED_COOKIE_SOURCES:
-        raise HTTPException(status_code=400, detail="Only Chrome is supported for cookies.")
-    return ["--cookies-from-browser", source]
-
-
 def run_yt_dlp_json(
     url: str,
-    cookie_source: str | None = None,
-    auto_close_chrome: bool = False,
     allow_playlist: bool = False,
     flat_playlist: bool = False,
 ) -> dict:
-    if cookie_source and auto_close_chrome:
-        close_chrome_processes()
     cmd = [
         sys.executable,
         "-m",
@@ -286,7 +409,6 @@ def run_yt_dlp_json(
         "ejs:github",
         *(["--flat-playlist"] if flat_playlist else []),
         *(["--yes-playlist"] if allow_playlist else ["--no-playlist"]),
-        *cookie_args(cookie_source),
         url,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -359,12 +481,8 @@ def pick_mp4_formats(formats: list[dict]) -> list[dict]:
 def get_direct_url(
     url: str,
     format_id: str,
-    cookie_source: str | None = None,
-    auto_close_chrome: bool = False,
 ) -> str:
     """Use yt-dlp to extract the direct CDN download URL for a given format."""
-    if cookie_source and auto_close_chrome:
-        close_chrome_processes()
     cmd = [
         sys.executable,
         "-m",
@@ -379,7 +497,6 @@ def get_direct_url(
         "--remote-components",
         "ejs:github",
         "--get-url",
-        *cookie_args(cookie_source),
         url,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -414,6 +531,8 @@ def stream_pipeline(ydl_cmd: list[str], ffmpeg_cmd: list[str], media_type: str, 
         msg = ffmpeg_err.text() or ydl_err.text() or "Streaming failed."
         raise HTTPException(status_code=400, detail=normalize_ydl_error(msg))
 
+    increment_active_transfers()
+
     def iterator():
         try:
             yield first_chunk
@@ -435,6 +554,7 @@ def stream_pipeline(ydl_cmd: list[str], ffmpeg_cmd: list[str], media_type: str, 
                 ydl_proc.wait(timeout=5)
             except Exception:
                 pass
+            decrement_active_transfers()
 
     headers = build_attachment_headers(filename)
     return StreamingResponse(iterator(), media_type=media_type, headers=headers)
@@ -523,6 +643,11 @@ def update_task(task_id: str, **fields):
         if task_id in active_tasks:
             active_tasks[task_id].update(fields)
 
+    if fields.get("status") in {"finished", "error"} and get_live_client_count() == 0:
+        with shutdown_state_lock:
+            global auto_shutdown_armed
+            auto_shutdown_armed = True
+
 
 def remove_prepared_file(file_path: Path, task_id: str | None = None):
     try:
@@ -536,12 +661,25 @@ def remove_prepared_file(file_path: Path, task_id: str | None = None):
             active_tasks.pop(task_id, None)
 
 
+def finalize_prepared_download(file_path: Path, task_id: str | None = None):
+    try:
+        remove_prepared_file(file_path, task_id)
+    finally:
+        decrement_active_transfers()
+
+
+def finalize_temp_directory(work_dir: Path):
+    try:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    finally:
+        decrement_active_transfers()
+
+
 def run_download_step(
     task_id: str,
     url: str,
     format_selector: str,
     output_template: Path,
-    cookies: str | None,
     label: str,
 ):
     cmd = [
@@ -552,7 +690,6 @@ def run_download_step(
         "--concurrent-fragments", "5",
         "--js-runtimes", "node",
         "--remote-components", "ejs:github",
-        *cookie_args(cookies),
         "-o", str(output_template),
         url,
     ]
@@ -785,7 +922,7 @@ def merge_streams_with_progress(task_id: str, video_path: Path, audio_path: Path
         message="Merge complete. Finalizing file...",
     )
 
-def background_downloader(task_id: str, url: str, format_id: str, filename: str, cookies: str | None, auto_close: bool):
+def background_downloader(task_id: str, url: str, format_id: str, filename: str):
     out_path = DOWNLOADS_DIR / filename
     task_dir = TEMP_DOWNLOADS_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -804,16 +941,12 @@ def background_downloader(task_id: str, url: str, format_id: str, filename: str,
         )
 
     try:
-        if cookies and auto_close:
-            close_chrome_processes()
-
-        run_download_step(task_id, url, format_id, video_template, cookies, "Video")
+        run_download_step(task_id, url, format_id, video_template, "Video")
         run_download_step(
             task_id,
             url,
             "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best",
             audio_template,
-            cookies,
             "Audio",
         )
 
@@ -865,7 +998,8 @@ def stream_merging(video_url: str, audio_url: str, filename: str):
     ]
     
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=1048576)
-    stderr_capture = StderrCapture(proc.stderr)
+    StderrCapture(proc.stderr)
+    increment_active_transfers()
 
     def iterator():
         try:
@@ -884,6 +1018,7 @@ def stream_merging(video_url: str, audio_url: str, filename: str):
                 proc.wait(timeout=5)
             except Exception:
                 pass
+            decrement_active_transfers()
 
     headers = build_attachment_headers(filename)
     return StreamingResponse(iterator(), media_type="video/mp4", headers=headers)
@@ -903,13 +1038,18 @@ def stream_remote_file(download_url: str, media_type: str, filename: str):
     if content_length:
         headers["Content-Length"] = content_length
 
+    increment_active_transfers()
+
     def iterator():
-        with upstream:
-            while True:
-                chunk = upstream.read(64 * 1024)
-                if not chunk:
-                    break
-                yield chunk
+        try:
+            with upstream:
+                while True:
+                    chunk = upstream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            decrement_active_transfers()
 
     resolved_media_type = media_type or upstream.headers.get_content_type() or "application/octet-stream"
     return StreamingResponse(iterator(), media_type=resolved_media_type, headers=headers)
@@ -920,7 +1060,6 @@ def build_playlist_download_job(
     dtype: str,
     height: str | None,
     audio_quality: str | None,
-    cookie_source: str | None,
 ) -> dict[str, str | list[str]]:
     if dtype == "mp4":
         if not shutil.which("ffmpeg"):
@@ -940,7 +1079,6 @@ def build_playlist_download_job(
                 "-f", build_playlist_mp4_selector(height),
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
-                *cookie_args(cookie_source),
             ],
         }
 
@@ -969,7 +1107,6 @@ def build_playlist_download_job(
                 "--audio-quality", f"{quality}K",
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
-                *cookie_args(cookie_source),
             ],
         }
 
@@ -1007,8 +1144,6 @@ def background_playlist_downloader(
     height: str | None,
     audio_quality: str | None,
     filename: str,
-    cookies: str | None,
-    auto_close: bool,
 ):
     out_path = DOWNLOADS_DIR / filename
     work_dir = TEMP_DOWNLOADS_DIR / task_id
@@ -1031,11 +1166,8 @@ def background_playlist_downloader(
             }
         )
 
-    if cookies and auto_close:
-        close_chrome_processes()
-
     try:
-        job = build_playlist_download_job(title, dtype, height, audio_quality, cookies)
+        job = build_playlist_download_job(title, dtype, height, audio_quality)
         cmd = [
             *job["ydl_cmd"],
             "--ignore-errors",
@@ -1163,13 +1295,8 @@ def download_playlist_archive(
     dtype: str,
     height: str | None,
     audio_quality: str | None,
-    cookie_source: str | None,
-    auto_close_chrome: bool,
 ):
-    if cookie_source and auto_close_chrome:
-        close_chrome_processes()
-
-    job = build_playlist_download_job(title, dtype, height, audio_quality, cookie_source)
+    job = build_playlist_download_job(title, dtype, height, audio_quality)
     work_dir = TEMP_DOWNLOADS_DIR / f"playlist-{uuid4().hex}"
     playlist_dir = work_dir / sanitize_filename(title)
     playlist_dir.mkdir(parents=True, exist_ok=True)
@@ -1194,40 +1321,29 @@ def download_playlist_archive(
         raise HTTPException(status_code=400, detail="No playlist items were downloaded.")
 
     zip_directory(playlist_dir, archive_path)
+    increment_active_transfers()
     return FileResponse(
         path=archive_path,
         media_type="application/zip",
         filename=str(job["filename"]),
-        background=BackgroundTask(shutil.rmtree, work_dir, ignore_errors=True),
+        background=BackgroundTask(finalize_temp_directory, work_dir),
     )
+@app.post("/api/client/register")
+def register_client(client_id: str = Form(...)):
+    mark_client_active(client_id)
+    return {"status": "ok"}
 
 
+@app.post("/api/client/ping")
+def ping_client(client_id: str = Form(...)):
+    mark_client_active(client_id)
+    return {"status": "ok"}
 
 
-@app.delete("/api/clear_temp")
-def clear_temp():
-    """Remove all files from the downloads directory and clear active tasks."""
-    try:
-        # Clear files on disk
-        for f in DOWNLOADS_DIR.glob("*"):
-            if f.is_file():
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
-            elif f.is_dir():
-                try:
-                    shutil.rmtree(f)
-                except Exception:
-                    pass
-        
-        # Clear memory state
-        with active_tasks_lock:
-            active_tasks.clear()
-            
-        return {"status": "success", "message": "Temporary files and active tasks cleared."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to clear temp files: {str(e)}")
+@app.post("/api/client/close")
+def close_client(client_id: str = Form(...)):
+    mark_client_closed(client_id)
+    return {"status": "ok"}
 
 
 @app.get("/")
@@ -1243,62 +1359,43 @@ def index():
 
 
 @app.get("/api/formats")
-def get_formats(
-    url: str,
-    cookies_from_browser: str | None = None,
-    auto_close_chrome: bool = False,
-):
+def get_formats(url: str):
     normalized = normalize_url(url)
-    cookies_from_browser = (cookies_from_browser or "").strip() or None
+    cached = get_cached_formats(normalized)
+    if cached is not None:
+        return cached
+
     probe = run_yt_dlp_json(
         normalized,
-        cookies_from_browser,
-        auto_close_chrome,
         allow_playlist=True,
         flat_playlist=True,
     )
 
     if is_playlist_metadata(probe):
         title = probe.get("title") or probe.get("playlist_title") or "playlist"
-        return {
+        response = {
             "title": title,
             "mp4": build_playlist_mp4_options(),
             "mp3_qualities": ALLOWED_AUDIO_QUALITIES,
             "is_playlist": True,
             "entry_count": count_playlist_entries(probe),
         }
+        set_cached_formats(normalized, response)
+        return response
 
-    data = run_yt_dlp_json(normalized, cookies_from_browser, auto_close_chrome)
-
+    data = probe if probe.get("formats") else run_yt_dlp_json(normalized)
     mp4_formats = pick_mp4_formats(data.get("formats") or [])
     title = data.get("title") or "download"
 
-    return {
+    response = {
         "title": title,
         "mp4": mp4_formats,
         "mp3_qualities": ALLOWED_AUDIO_QUALITIES,
         "is_playlist": False,
         "entry_count": 1,
     }
-
-
-@app.get("/api/download_url")
-def download_url(
-    url: str,
-    format_id: str,
-    cookies_from_browser: str | None = None,
-    auto_close_chrome: bool = False,
-):
-    """Get a fresh direct CDN URL for a given format."""
-    normalized = normalize_url(url)
-    cookies_from_browser = (cookies_from_browser or "").strip() or None
-    direct = get_direct_url(
-        normalized,
-        format_id,
-        cookies_from_browser,
-        auto_close_chrome,
-    )
-    return {"url": direct}
+    set_cached_formats(normalized, response)
+    return response
 
 
 @app.get("/api/prepare")
@@ -1308,13 +1405,9 @@ def prepare(
     background_tasks: BackgroundTasks,
     title: str = "video",
     height: str | None = None,
-    cookies_from_browser: str | None = None,
-    auto_close_chrome: str | None = None
 ):
     normalized = normalize_url(url)
     task_id = generate_task_id(normalized, format_id)
-    should_close = parse_bool(auto_close_chrome)
-    cookies_source = (cookies_from_browser or "").strip() or None
     
     with active_tasks_lock:
         if task_id in active_tasks:
@@ -1352,7 +1445,6 @@ def prepare(
                 background_tasks.add_task(
                     background_downloader,
                     task_id, normalized, format_id, filename,
-                    cookies_source, should_close
                 )
 
             
@@ -1367,17 +1459,11 @@ def prepare_playlist(
     title: str = "playlist",
     height: str | None = None,
     audio_quality: str | None = None,
-    cookies_from_browser: str | None = None,
-    auto_close_chrome: str | None = None,
 ):
     normalized = normalize_url(url)
     dtype = type.lower()
-    cookies_source = (cookies_from_browser or "").strip() or None
-    should_close = parse_bool(auto_close_chrome)
     task_id = generate_playlist_task_id(normalized, dtype, height, audio_quality)
-    filename = str(
-        build_playlist_download_job(title, dtype, height, audio_quality, cookies_source)["filename"]
-    )
+    filename = str(build_playlist_download_job(title, dtype, height, audio_quality)["filename"])
 
     with active_tasks_lock:
         existing = active_tasks.get(task_id)
@@ -1422,8 +1508,6 @@ def prepare_playlist(
                     height,
                     audio_quality,
                     filename,
-                    cookies_source,
-                    should_close,
                 )
 
         return active_tasks[task_id]
@@ -1448,11 +1532,12 @@ def download_prepared(task_id: str):
         raise HTTPException(status_code=404, detail="Prepared file no longer exists.")
 
     media_type = "application/zip" if file_path.suffix.lower() == ".zip" else "application/octet-stream"
+    increment_active_transfers()
     return FileResponse(
         path=file_path,
         filename=filename,
         media_type=media_type,
-        background=BackgroundTask(remove_prepared_file, file_path, task_id),
+        background=BackgroundTask(finalize_prepared_download, file_path, task_id),
     )
 
 
@@ -1465,13 +1550,9 @@ def download(
     height: str | None = Form(None),
     audio_quality: str = Form(None),
     is_playlist: str | None = Form(None),
-    cookies_from_browser: str = Form(None),
-    auto_close_chrome: str = Form(None),
 ):
     normalized_url = normalize_url(url)
     dtype = type.lower()
-    cookies_source = (cookies_from_browser or "").strip() or None
-    should_close_chrome = parse_bool(auto_close_chrome)
     if parse_bool(is_playlist):
         return download_playlist_archive(
             normalized_url,
@@ -1479,8 +1560,6 @@ def download(
             dtype,
             height,
             audio_quality,
-            cookies_source,
-            should_close_chrome,
         )
 
     if dtype == "mp4":
@@ -1504,16 +1583,17 @@ def download(
         if filename:
             file_path = DOWNLOADS_DIR / filename
             if file_path.exists():
+                increment_active_transfers()
                 return FileResponse(
                     path=file_path,
                     filename=download_filename,
                     media_type="video/mp4",
-                    background=BackgroundTask(remove_prepared_file, file_path, task_id),
+                    background=BackgroundTask(finalize_prepared_download, file_path, task_id),
                 )
 
 
         # Fallback/Default: Get format info to decide
-        full_data = run_yt_dlp_json(normalized_url, cookies_source, should_close_chrome)
+        full_data = run_yt_dlp_json(normalized_url)
         formats = full_data.get("formats") or []
         target_fmt = next((f for f in formats if f.get("format_id") == str(format_id)), None)
         
@@ -1526,9 +1606,7 @@ def download(
             # For DASH, we really want them to use /api/prepare first.
             # But if they click directly, we'll use the slow stream_merging as fallback
             # OR better: inform them to wait. For now, keep the old logic but prioritize preparation.
-            video_url = target_fmt.get("url") or get_direct_url(
-                normalized_url, str(format_id), cookies_source, should_close_chrome
-            )
+            video_url = target_fmt.get("url") or get_direct_url(normalized_url, str(format_id))
             audio_fmts = [f for f in formats if f.get("vcodec") == "none" and f.get("ext") == "m4a"]
             if not audio_fmts:
                 audio_fmts = [f for f in formats if f.get("vcodec") == "none"]
@@ -1537,15 +1615,11 @@ def download(
                 return stream_remote_file(video_url, "video/mp4", download_filename)
                 
             best_audio = max(audio_fmts, key=lambda f: f.get("tbr") or 0)
-            audio_url = best_audio.get("url") or get_direct_url(
-                normalized_url, best_audio["format_id"], cookies_source, should_close_chrome
-            )
+            audio_url = best_audio.get("url") or get_direct_url(normalized_url, best_audio["format_id"])
             
             return stream_merging(video_url, audio_url, download_filename)
         else:
-            direct = target_fmt.get("url") or get_direct_url(
-                normalized_url, str(format_id), cookies_source, should_close_chrome
-            )
+            direct = target_fmt.get("url") or get_direct_url(normalized_url, str(format_id))
             return stream_remote_file(direct, target_fmt.get("mime_type") or "video/mp4", download_filename)
 
 
@@ -1560,8 +1634,6 @@ def download(
         if not shutil.which("ffmpeg"):
             raise HTTPException(status_code=500, detail="ffmpeg was not found on PATH.")
 
-        if cookies_source and should_close_chrome:
-            close_chrome_processes()
         ydl_cmd = [
             sys.executable,
             "-m",
@@ -1575,7 +1647,6 @@ def download(
             "node",
             "--remote-components",
             "ejs:github",
-            *cookie_args(cookies_source),
             "-o",
             "-",
             normalized_url,

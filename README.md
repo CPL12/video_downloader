@@ -23,8 +23,6 @@ A clean local downloader for yt-dlp-compatible media URLs. Paste a link, fetch a
 - Playlist downloads packaged as ZIP archives
 - Two-column format picker with resolution, bitrate, and size hints
 - High-resolution preparation flow for formats that require video/audio merging
-- Optional Chrome cookie import for restricted videos
-- Built-in temporary file cleanup controls
 
 ## Latest Screenshots
 
@@ -79,5 +77,5 @@ Then open `http://127.0.0.1:8000` in your browser.
 - Playlist downloads are packaged as ZIP archives after yt-dlp finishes downloading the full collection.
 - MP3 downloads are transcoded with FFmpeg at the selected bitrate.
 - The backend may also work with other yt-dlp-compatible URLs that are not explicitly called out in the UI.
-- If YouTube shows a "confirm you're not a bot" error, enable "Use Chrome cookies". Chrome must be closed; you can also enable "Auto-close Chrome".
+- The local server shuts down automatically shortly after the last app tab closes.
 - Use only content you own or are authorized to download.
