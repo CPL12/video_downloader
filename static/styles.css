@@ -323,22 +323,6 @@ button.secondary {
   display: none;
 }
 
-.maintenance-panel {
-  margin-top: 8px;
-  padding: 0;
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 12px;
-  animation: fadeIn 0.7s ease-out both;
-}
-
-@media (max-width: 720px) {
-  .maintenance-panel {
-    justify-content: center;
-  }
-}
-
 @keyframes rise {
   from {
     opacity: 0;

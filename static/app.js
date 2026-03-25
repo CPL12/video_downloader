@@ -15,7 +15,6 @@ const typeToggle = document.getElementById("typeToggle");
 const progressContainer = document.getElementById("progressContainer");
 const progressFill = document.getElementById("progressFill");
 const progressText = document.getElementById("progressText");
-const clearTempBtn = document.getElementById("clearTempBtn");
 
 let currentData = null;
 let downloadState = "idle";
@@ -582,30 +581,6 @@ clearBtn.addEventListener("click", () => {
 });
 
 downloadBtn.addEventListener("click", triggerDownload);
-
-clearTempBtn.addEventListener("click", async () => {
-  if (!confirm("Are you sure you want to clear all temporary files and active tasks from the server?")) {
-    return;
-  }
-
-  setStatus("Cleaning up server files...", "info");
-  try {
-    const response = await fetch("/api/clear_temp", { method: "DELETE" });
-    if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.detail || "Failed to clear temporary files.");
-    }
-    const result = await response.json();
-
-    stopPreparation();
-    resetDownloadButton();
-    hideProgress();
-
-    setStatus(result.message, "info");
-  } catch (error) {
-    setStatus(error.message, "error");
-  }
-});
 
 Array.from(typeToggle.querySelectorAll("input")).forEach((input) => {
   input.addEventListener("change", updateTypeView);

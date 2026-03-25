@@ -14,7 +14,7 @@ from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Form, BackgroundTasks
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -1232,7 +1232,14 @@ def clear_temp():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return HTMLResponse(
+        (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/api/formats")
