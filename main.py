@@ -524,6 +524,18 @@ def update_task(task_id: str, **fields):
             active_tasks[task_id].update(fields)
 
 
+def remove_prepared_file(file_path: Path, task_id: str | None = None):
+    try:
+        if file_path.exists():
+            file_path.unlink()
+    except Exception:
+        pass
+
+    if task_id:
+        with active_tasks_lock:
+            active_tasks.pop(task_id, None)
+
+
 def run_download_step(
     task_id: str,
     url: str,
@@ -1429,7 +1441,12 @@ def download_prepared(task_id: str):
         raise HTTPException(status_code=404, detail="Prepared file no longer exists.")
 
     media_type = "application/zip" if file_path.suffix.lower() == ".zip" else "application/octet-stream"
-    return FileResponse(path=file_path, filename=filename, media_type=media_type)
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type=media_type,
+        background=BackgroundTask(remove_prepared_file, file_path, task_id),
+    )
 
 
 @app.post("/api/download")
@@ -1483,7 +1500,8 @@ def download(
                 return FileResponse(
                     path=file_path,
                     filename=download_filename,
-                    media_type="video/mp4"
+                    media_type="video/mp4",
+                    background=BackgroundTask(remove_prepared_file, file_path, task_id),
                 )
 
 
