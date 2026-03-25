@@ -2,7 +2,7 @@
 
 Language: English | [简体中文](README.zh-CN.md)
 
-A clean local downloader for popular platforms like YouTube, Bilibili, TikTok, and Instagram. Paste a link, fetch available formats, and save a single video or an entire playlist as MP4 or MP3 directly from your browser.
+A clean local downloader for yt-dlp-compatible media URLs. Paste a link, fetch available formats, and save a single video or an entire playlist as MP4 or MP3 directly from your browser.
 
 <p align="center">
   <img src="docs/screenshots/banner.png" alt="Banner image for the local media downloader project" width="100%" />
@@ -18,28 +18,13 @@ A clean local downloader for popular platforms like YouTube, Bilibili, TikTok, a
 
 ## Highlights
 
-- Popular platform support in one local UI
+- Clean local browser workflow for yt-dlp-compatible URLs
 - MP4 video and MP3 audio downloads
 - Playlist downloads packaged as ZIP archives
-- Format picker with resolution, bitrate, and size hints
+- Two-column format picker with resolution, bitrate, and size hints
 - High-resolution preparation flow for formats that require video/audio merging
 - Optional Chrome cookie import for restricted videos
 - Built-in temporary file cleanup controls
-
-## Supported Platforms
-
-The UI highlights these 10 popular platforms:
-
-- YouTube
-- Bilibili
-- TikTok
-- Instagram
-- X
-- Facebook
-- Vimeo
-- Twitch
-- Dailymotion
-- SoundCloud
 
 ## Latest Screenshots
 
@@ -48,7 +33,7 @@ The UI highlights these 10 popular platforms:
 </p>
 
 <p align="center">
-  <em>Landing screen with the URL field, platform highlights, and the single-video or playlist download entry point.</em>
+  <em>Landing screen with the URL field, fetch action, and the single-video or playlist download entry point.</em>
 </p>
 
 <p align="center">
@@ -93,6 +78,6 @@ Then open `http://127.0.0.1:8000` in your browser.
 - Single-video MP4 options list formats that include both video and audio for streaming.
 - Playlist downloads are packaged as ZIP archives after yt-dlp finishes downloading the full collection.
 - MP3 downloads are transcoded with FFmpeg at the selected bitrate.
-- The backend may still work with other yt-dlp-compatible URLs, but the UI and README only highlight the 10 most popular platforms above.
+- The backend may also work with other yt-dlp-compatible URLs that are not explicitly called out in the UI.
 - If YouTube shows a "confirm you're not a bot" error, enable "Use Chrome cookies". Chrome must be closed; you can also enable "Auto-close Chrome".
 - Use only content you own or are authorized to download.

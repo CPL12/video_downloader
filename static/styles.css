@@ -263,43 +263,6 @@ button.secondary {
   gap: 16px;
 }
 
-.support-panel {
-  display: grid;
-  gap: 16px;
-}
-
-.support-heading {
-  display: flex;
-  align-items: flex-start;
-}
-
-.support-heading p {
-  margin: 0;
-  color: var(--muted);
-  max-width: 720px;
-}
-
-.support-examples {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.platform-chip,
-.platform-item {
-  display: inline-flex;
-  align-items: center;
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--input-bg);
-  font-size: 0.9rem;
-}
-
-.platform-chip {
-  font-weight: 700;
-}
-
 .toggle {
   display: flex;
   gap: 12px;
@@ -321,18 +284,29 @@ button.secondary {
 .option-list {
   display: grid;
   gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.option-list .status {
+  grid-column: 1 / -1;
 }
 
 .option {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
   padding: 10px 14px;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--input-bg);
   cursor: pointer;
+  min-height: 84px;
+}
+
+.option > div {
+  display: grid;
+  gap: 4px;
 }
 
 .option-title {
@@ -350,36 +324,18 @@ button.secondary {
 }
 
 .maintenance-panel {
-  margin-top: 48px;
-  padding: 24px;
-  background: rgba(217, 78, 31, 0.05);
-  border: 1px dashed var(--accent-dark);
-  border-radius: 24px;
+  margin-top: 8px;
+  padding: 0;
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
-  gap: 24px;
+  gap: 12px;
   animation: fadeIn 0.7s ease-out both;
-}
-
-.maintenance-info h3 {
-  margin: 0 0 4px;
-  font-family: "Space Grotesk", sans-serif;
-  color: var(--accent-dark);
-  font-size: 1.1rem;
-}
-
-.maintenance-info p {
-  margin: 0;
-  font-size: 0.9rem;
-  color: var(--muted);
 }
 
 @media (max-width: 720px) {
   .maintenance-panel {
-    flex-direction: column;
-    text-align: center;
-    gap: 16px;
+    justify-content: center;
   }
 }
 
@@ -418,6 +374,10 @@ button.secondary {
 
   .toggle {
     flex-direction: column;
+  }
+
+  .option-list {
+    grid-template-columns: 1fr;
   }
 
   button {

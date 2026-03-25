@@ -16,8 +16,6 @@ const progressContainer = document.getElementById("progressContainer");
 const progressFill = document.getElementById("progressFill");
 const progressText = document.getElementById("progressText");
 const clearTempBtn = document.getElementById("clearTempBtn");
-const platformSummary = document.getElementById("platformSummary");
-const platformExamples = document.getElementById("platformExamples");
 
 let currentData = null;
 let downloadState = "idle";
@@ -26,18 +24,6 @@ let playlistTaskId = null;
 let playlistTaskSignature = "";
 const pageParams = new URLSearchParams(window.location.search);
 const demoMode = pageParams.get("demo");
-const POPULAR_PLATFORMS = [
-  "YouTube",
-  "Bilibili",
-  "TikTok",
-  "Instagram",
-  "X",
-  "Facebook",
-  "Vimeo",
-  "Twitch",
-  "Dailymotion",
-  "SoundCloud",
-];
 
 if (pageParams.get("theme") === "light") {
   document.documentElement.dataset.theme = "light";
@@ -122,23 +108,6 @@ function buildFormSignature(formData) {
     params.set(name, value);
   }
   return params.toString();
-}
-
-function renderPlatformExamples(platforms) {
-  platformExamples.innerHTML = "";
-
-  platforms.forEach((platform) => {
-    const chip = document.createElement("span");
-    chip.className = "platform-chip";
-    chip.textContent = platform;
-    platformExamples.appendChild(chip);
-  });
-}
-
-function showPopularPlatforms() {
-  renderPlatformExamples(POPULAR_PLATFORMS);
-  platformSummary.textContent =
-    "Works well with these common platforms. Other yt-dlp-compatible URLs may also work.";
 }
 
 function renderMp4Options(formats, isPlaylist = false) {
@@ -491,8 +460,13 @@ function triggerDownload() {
         setStatus("Playlist archive is not ready yet.", "error");
         return;
       }
+      const finishedTaskId = playlistTaskId;
+      playlistTaskId = null;
+      playlistTaskSignature = "";
+      resetDownloadButton();
+      hideProgress();
       setStatus("Download starting - your browser will save the playlist ZIP.", "info");
-      triggerPreparedDownload(playlistTaskId, currentData.title || "playlist");
+      triggerPreparedDownload(finishedTaskId, currentData.title || "playlist");
       return;
     }
 
@@ -556,10 +530,7 @@ function applyDemoState() {
 
   if (demoMode === "overview") {
     urlInput.value = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    setStatus(
-      "Browse the popular platform list below or fetch formats to download MP4 or MP3 directly from your browser.",
-      "info"
-    );
+    setStatus("Paste a link and fetch formats to download MP4 or MP3 directly from your browser.", "info");
     return;
   }
 
@@ -641,5 +612,4 @@ Array.from(typeToggle.querySelectorAll("input")).forEach((input) => {
 });
 
 updateTypeView();
-showPopularPlatforms();
 applyDemoState();

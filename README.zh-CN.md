@@ -2,7 +2,7 @@
 
 语言：简体中文 | [English](README.md)
 
-这是一款本地媒体下载工具，适用于 YouTube、Bilibili、TikTok、Instagram 等常见平台。粘贴链接后即可获取可用格式，并直接在浏览器中下载单个视频，或将整个播放列表保存为 MP4 或 MP3。
+这是一款本地媒体下载工具，适用于 yt-dlp 兼容的媒体链接。粘贴链接后即可获取可用格式，并直接在浏览器中下载单个视频，或将整个播放列表保存为 MP4 或 MP3。
 
 <p align="center">
   <img src="docs/screenshots/banner.png" alt="本地媒体下载器项目横幅图" width="100%" />
@@ -18,28 +18,13 @@
 
 ## 功能亮点
 
-- 单一界面支持多个常见平台
+- 简洁的本地浏览器下载流程
 - 支持 MP4 视频和 MP3 音频下载
 - 支持将播放列表下载并打包为 ZIP
-- 提供分辨率、码率、体积等格式信息
+- 双列展示分辨率、码率、体积等格式信息
 - 支持需要合并音视频时的高分辨率准备流程
 - 可选导入 Chrome cookies 处理受限内容
 - 内置服务器临时文件清理功能
-
-## 支持的平台
-
-当前界面重点展示以下 10 个常见平台：
-
-- YouTube
-- Bilibili
-- TikTok
-- Instagram
-- X
-- Facebook
-- Vimeo
-- Twitch
-- Dailymotion
-- SoundCloud
 
 ## 最新截图
 
@@ -48,7 +33,7 @@
 </p>
 
 <p align="center">
-  <em>首页界面，包含链接输入框、平台提示，以及单视频或播放列表下载入口。</em>
+  <em>首页界面，包含链接输入框、格式获取操作，以及单视频或播放列表下载入口。</em>
 </p>
 
 <p align="center">
@@ -93,6 +78,6 @@ python main.py
 - 单视频 MP4 选项会列出包含视频和音频、可直接下载的格式。
 - 播放列表下载会在后台处理完成后打包成 ZIP。
 - MP3 下载会通过 FFmpeg 按所选码率转码。
-- 虽然后端通常也兼容更多 yt-dlp 支持的站点，但当前 UI 和 README 主要展示上面这 10 个常见平台。
+- 后端通常也兼容更多 yt-dlp 支持的站点，即使当前 UI 没有逐一列出。
 - 如果 YouTube 出现 “confirm you're not a bot” 错误，请启用 “Use Chrome cookies”。Chrome 必须先关闭，也可以启用 “Auto-close Chrome”。
 - 仅下载你拥有版权或已获得授权的内容。
