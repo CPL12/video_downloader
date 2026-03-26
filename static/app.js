@@ -132,9 +132,11 @@ function resetDownloadButton() {
 function triggerPreparedDownload(taskId, filename = "") {
   const link = document.createElement("a");
   link.href = `/api/download_prepared?task_id=${encodeURIComponent(taskId)}`;
+  link.target = "_blank";
   if (filename) {
     link.download = filename;
   }
+  link.rel = "noopener";
   link.style.display = "none";
   document.body.appendChild(link);
   link.click();
@@ -275,19 +277,6 @@ async function fetchFormats() {
   }
 }
 
-function fillFormFields(formData) {
-  for (const [name, value] of formData.entries()) {
-    let field = downloadForm.querySelector(`[name="${name}"]`);
-    if (!field) {
-      field = document.createElement("input");
-      field.type = "hidden";
-      field.name = name;
-      downloadForm.appendChild(field);
-    }
-    field.value = value;
-  }
-}
-
 function buildFormData() {
   const type = document.querySelector("input[name='downloadType']:checked").value;
   const url = urlInput.value.trim();
@@ -309,6 +298,19 @@ function buildFormData() {
     formData.set("audio_quality", mp3Quality.value);
   }
   return formData;
+}
+
+function fillFormFields(formData) {
+  for (const [name, value] of formData.entries()) {
+    let field = downloadForm.querySelector(`[name="${name}"]`);
+    if (!field) {
+      field = document.createElement("input");
+      field.type = "hidden";
+      field.name = name;
+      downloadForm.appendChild(field);
+    }
+    field.value = value;
+  }
 }
 
 async function startPlaylistPreparation(formData) {
@@ -504,7 +506,7 @@ function triggerDownload() {
       playlistTaskSignature = "";
       resetDownloadButton();
       hideProgress();
-      setStatus("Download starting - your browser will save the playlist ZIP.", "info");
+      setStatus("Download starting - IDM or your browser will handle the playlist ZIP.", "info");
       triggerPreparedDownload(finishedTaskId, currentData.title || "playlist");
       return;
     }
@@ -517,7 +519,7 @@ function triggerDownload() {
     fillFormFields(formData);
     resetDownloadButton();
     hideProgress();
-    setStatus("Download starting - your browser or download manager will handle it.", "info");
+    setStatus("Download starting - IDM or your browser will handle it.", "info");
     downloadForm.submit();
     return;
   }
@@ -554,10 +556,12 @@ function triggerDownload() {
     return;
   }
   fillFormFields(formData);
+  resetDownloadButton();
+  hideProgress();
   if (currentData.is_playlist) {
-    setStatus("Playlist download is being built as a ZIP archive. Your browser will save it when it is ready.", "info");
+    setStatus("Playlist download is starting - IDM or your browser will handle it.", "info");
   } else {
-    setStatus("Download starting - your browser or download manager will handle it.", "info");
+    setStatus("Download starting - IDM or your browser will handle it.", "info");
   }
   downloadForm.submit();
 }
